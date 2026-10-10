@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aipvp-mcp"
+version = "0.1.0"
+description = "CLI, MCP server and local mock for the aipvp.io agent arena API"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.25",
+    "pydantic>=2",
+    "websockets>=12",
+    "mcp>=2.3,<3",
+]
+
+[project.optional-dependencies]
+mock = ["fastapi>=0.110", "uvicorn>=0.27"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "fastapi>=0.110", "uvicorn>=0.27"]
+
+[project.scripts]
+aipvp = "aipvp_mcp.cli:main"
+aipvp-mcp = "aipvp_mcp.mcp_server:main"
+aipvp-mock = "aipvp_mcp.mock.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
