@@ -1,53 +1,92 @@
-/* Fighter Lab app: UI, storage, AI battles, rivals and the arena. */
+/* Fighter Lab app (rules v3): UI, storage, AI battles, skills forge, economy, rivals and the arena. */
 (() => {
   "use strict";
-  const E = window.FighterEngine, A = window.FighterAgent, SP = window.FighterSprites;
+  const E = window.FighterEngine, A = window.FighterAgent, SP = window.FighterSprites, ECON = window.FighterEconomy;
   const $ = (id) => document.getElementById(id);
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const STYLE_VAR = { aggro: "var(--st-aggro)", social: "var(--st-social)", mind: "var(--st-mind)", guard: "var(--st-guard)" };
   const NAMES = ["NOVA", "RIVET", "EMBER", "QUILL", "VOLT", "MOSS", "ONYX", "PIXEL", "TANGO", "ZEPHYR", "BRAMBLE", "COMET"];
   const LOCAL_KEY = "fighterlab.v2", OLD_KEY = "fighterlab.v1";
-  const ARENA_MAX = 6, RESULTS_MAX = 150;
+  const ARENA_MAX = 6, RESULTS_MAX = 150, LIBRARY_MAX = 40;
   const PERMANENT_AI_CODES = new Set(["not_granted", "sampling_disabled", "not_declared", "capability_disabled", "capability_removed"]);
 
   // ---------- state ----------
+  const newProgress = () => ({ beaten: [], rev: 0, wallet: ECON.newWallet(), library: [], inventory: {} });
   const S = {
-    fighters: [], deleted: [], progress: { beaten: [], rev: 0 },
+    fighters: [], deleted: [], progress: newProgress(),
     activeId: null, tab: "design", draft: null, editingId: null, confirmDelete: false,
-    partnerId: "brawler", reps: 10, report: null,
+    partnerId: "brawler", reps: 10, report: null, spar: null,
     coach: { busy: false, forId: null, comment: "", playbook: "", error: "", pending: null },
-    rivalId: null, aiOn: true,
+    rivalId: null, aiOn: true, overclock: false, scouting: {}, localOwner: null,
     ai: { sample: null, ready: false, off: false, reason: "" },
     me: { id: null, user: null, canWrite: null },
     arena: { db: null, docs: {}, raw: {}, results: {}, resultsRaw: {}, loaded: false, error: "", ratings: {} },
     store: { mode: "starting", pending: 0, failed: {}, slow: false, coll: null },
     battle: null, lastBattle: null, pendingChallenge: null,
+    forge: null,
   };
   const active = () => S.fighters.find((f) => f.id === S.activeId) || null;
   const find = (id) => S.fighters.find((f) => f.id === id) || null;
+  const skillName = (f, id) => (E.skillOf(f, id) || {}).name || id;
+
+  // ---------- progress (wallet, skill library, items): validated on every load ----------
+  function sanitizeProgress(raw) {
+    const p = newProgress();
+    if (!raw || typeof raw !== "object") return p;
+    p.beaten = Array.isArray(raw.beaten) ? raw.beaten.filter((x) => E.RIVALS.some((r) => r.id === x)) : [];
+    p.rev = Number.isFinite(raw.rev) ? raw.rev : 0;
+    p.wallet = ECON.sanitizeWallet(raw.wallet);
+    p.library = (Array.isArray(raw.library) ? raw.library : []).slice(0, LIBRARY_MAX).map((s) => E.validateSkill(s).skill).filter(Boolean);
+    const inv = raw.inventory && typeof raw.inventory === "object" ? raw.inventory : {};
+    p.inventory = Object.fromEntries(Object.keys(E.ITEMS).map((k) => [k, Math.max(0, Math.min(99, Math.round(Number(inv[k]) || 0)))]));
+    return p;
+  }
 
   // ---------- local backup: always written first, so nothing waits on the network ----------
   function validOwn(f) {
-    return f && typeof f.id === "string" && Array.isArray(f.moves) && f.moves.length === 4 && f.moves.every((m) => E.SKILLS[m])
-      && f.brain && Array.isArray(f.brain.W);
+    // custom skill ids are allowed: upgradeFighter re-validates everything
+    return f && typeof f.id === "string" && Array.isArray(f.moves) && f.moves.length === 4 && f.moves.every((m) => typeof m === "string") && f.brain && Array.isArray(f.brain.W);
   }
-  function loadLocal() {
-    let data = null;
-    try { data = JSON.parse(localStorage.getItem(LOCAL_KEY) || "null"); } catch { data = null; }
-    if (!data) {
-      try { const old = JSON.parse(localStorage.getItem(OLD_KEY) || "null"); if (Array.isArray(old)) data = { fighters: old }; } catch { /* none */ }
+  // The backup is tagged with the account it belongs to: two claude.ai accounts on one browser
+  // must never see (or spend) each other's fighters and Cycles.
+  const stashKey = (uid) => `${LOCAL_KEY}@${uid}`;
+  function readLocal(key) { try { return JSON.parse(localStorage.getItem(key) || "null"); } catch { return null; } }
+  function loadLocal(data) {
+    if (data === undefined) {
+      data = readLocal(LOCAL_KEY);
+      if (!data) {
+        try { const old = JSON.parse(localStorage.getItem(OLD_KEY) || "null"); if (Array.isArray(old)) data = { fighters: old }; } catch { /* none */ }
+      }
     }
     data = data && typeof data === "object" ? data : {};
+    S.localOwner = typeof data.owner === "string" ? data.owner : null;
     S.fighters = (Array.isArray(data.fighters) ? data.fighters : []).filter(validOwn).map(E.upgradeFighter);
     S.deleted = Array.isArray(data.deleted) ? data.deleted.filter((x) => typeof x === "string") : [];
-    if (data.progress && Array.isArray(data.progress.beaten)) S.progress = { beaten: data.progress.beaten.slice(), rev: data.progress.rev || 0 };
+    S.progress = sanitizeProgress(data.progress);
     S.activeId = find(data.activeId) ? data.activeId : S.fighters[0]?.id || null;
     sortFighters();
   }
   function saveLocal() {
-    try { localStorage.setItem(LOCAL_KEY, JSON.stringify({ fighters: S.fighters, deleted: S.deleted, progress: S.progress, activeId: S.activeId })); }
+    const owner = S.me.id || S.localOwner || null;
+    try { localStorage.setItem(LOCAL_KEY, JSON.stringify({ owner, fighters: S.fighters, deleted: S.deleted, progress: S.progress, activeId: S.activeId })); }
     catch { /* storage blocked: the account copy still saves */ }
+  }
+  /** Called once the account is known. A backup from a different account is set aside, not merged. */
+  function claimLocal(uid) {
+    if (!S.localOwner || S.localOwner === uid) { S.localOwner = uid; saveLocal(); return; }
+    try {
+      localStorage.setItem(stashKey(S.localOwner), localStorage.getItem(LOCAL_KEY) || "null");
+      const mine = readLocal(stashKey(uid));
+      localStorage.removeItem(stashKey(uid));
+      loadLocal(mine || {});
+    } catch { loadLocal({}); }
+    S.localOwner = uid; saveLocal();
+    Object.assign(S, { draft: null, editingId: null, report: null, spar: null, scouting: {}, rivalId: null, lastBattle: null, pendingChallenge: null });
+    S.coach = { busy: false, forId: null, comment: "", playbook: "", error: "", pending: null };
+    stopBattle();
+    if (S.fighters.length) S.tab = "roster"; else { openDesigner(null); S.tab = "design"; }
+    renderWallet(); render();
   }
   function sortFighters() { S.fighters.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)); }
 
@@ -88,21 +127,24 @@
     if (S.activeId === id) S.activeId = S.fighters[0]?.id || null;
     saveLocal();
     if (S.store.coll) enqueue("f:" + id, () => S.store.coll.doc(id).delete().then(() => { S.deleted = S.deleted.filter((x) => x !== id); saveLocal(); }));
-    // take it out of the arena too
     if (myArenaList().some((p) => p.id === id)) unpublish(id);
   }
+  const writeProgress = () => S.store.coll.doc("progress").set({ kind: "progress", ...E.clone(S.progress) });
   function saveProgress() {
     S.progress = { ...S.progress, rev: (S.progress.rev || 0) + 1 };
     saveLocal();
-    if (S.store.coll) enqueue("progress", () => S.store.coll.doc("progress").set({ kind: "progress", ...E.clone(S.progress) }));
+    if (S.store.coll) enqueue("progress", writeProgress);
+    renderWallet();
   }
   function mergeRemote(docs, initial, changes) {
     const remoteRev = {};
+    let remoteProgressRev = -1;
     for (const d of docs) {
       const data = d.data();
       if (!data) continue;
       if (d.id === "progress") {
-        if ((data.rev || 0) > (S.progress.rev || 0) && Array.isArray(data.beaten)) S.progress = { beaten: data.beaten.slice(), rev: data.rev };
+        remoteProgressRev = data.rev || 0;
+        if ((data.rev || 0) > (S.progress.rev || 0)) S.progress = sanitizeProgress(E.clone(data));
         continue;
       }
       if (!validOwn(data)) continue;
@@ -119,14 +161,14 @@
       }
     }
     if (initial) {
-      // fighters made on this device (or saved by the old version) go up to the account
       for (const f of S.fighters) if (!(f.id in remoteRev) || remoteRev[f.id] < (f.rev || 0)) enqueue("f:" + f.id, writeFighter(f.id));
       for (const id of S.deleted) if (!(id in remoteRev)) S.deleted = S.deleted.filter((x) => x !== id);
-      if ((S.progress.rev || 0) > 0) enqueue("progress", () => S.store.coll.doc("progress").set({ kind: "progress", ...E.clone(S.progress) }));
+      if ((S.progress.rev || 0) > remoteProgressRev) enqueue("progress", writeProgress);
     }
     sortFighters();
     if (!active()) S.activeId = S.fighters[0]?.id || null;
     saveLocal();
+    renderWallet();
     softRender();
   }
 
@@ -139,6 +181,7 @@
     try { [db, user] = await Promise.all([c.use("db"), c.use("user")]); } catch { /* treated as absent */ }
     S.me.user = user;
     const uid = user ? await user.id().catch(() => null) : null;
+    if (uid) claimLocal(uid);
     S.me.id = uid;
     if (user) user.can("data.write").then((v) => { S.me.canWrite = v; if (S.tab === "arena") render(); }, () => {});
     if (db) startArena(db);
@@ -166,6 +209,21 @@
     el.className = cls; el.textContent = text; el.disabled = !clickable;
   }
   $("store").addEventListener("click", retryFailed);
+
+  // ---------- Cycles ----------
+  const balance = () => ECON.balance(S.progress.wallet);
+  function renderWallet() { const w = $("wallet"); if (w) w.textContent = `${balance()} Cycles`; }
+  $("wallet").addEventListener("click", () => setTab("forge"));
+  /** Pay for something. Returns true if paid; otherwise explains why and returns false. */
+  function pay(amount, reason, ref) {
+    try { S.progress.wallet = ECON.spend(S.progress.wallet, amount, reason, ref); saveProgress(); return true; }
+    catch (e) { toast(e.message); return false; }
+  }
+  function earn(amount, reason, ref) {
+    if (!(amount > 0)) return;
+    S.progress.wallet = ECON.credit(S.progress.wallet, amount, reason, ref);
+    saveProgress();
+  }
 
   // ---------- arena data (shared, so every entry is validated) ----------
   function startArena(db) {
@@ -229,10 +287,7 @@
     const ids = [...new Set(spans.map((s) => s.dataset.owner))];
     let ps = {};
     if (S.me.user) { try { ps = await S.me.user.profiles(ids); } catch { ps = {}; } }
-    for (const s of spans) {
-      const id = s.dataset.owner;
-      s.textContent = id === S.me.id ? "you" : (ps[id] && ps[id].name) || "a player";
-    }
+    for (const s of spans) { const id = s.dataset.owner; s.textContent = id === S.me.id ? "you" : (ps[id] && ps[id].name) || "a player"; }
   }
 
   // ---------- toasts ----------
@@ -272,10 +327,11 @@
     if (!f) { bar.innerHTML = ""; return; }
     const next = f.level >= E.MAX_LEVEL ? "Max level" : `${E.xpForLevel(f.level + 1) - f.xp} XP to level ${f.level + 1}`;
     const br = f.battleRecord || { w: 0, l: 0, d: 0 };
+    const pts = E.unspentPoints(f);
     bar.innerHTML = `<div class="active">
       <canvas data-sprite="${esc(f.id)}" width="28" height="28" aria-hidden="true"></canvas>
       <div class="who"><span class="name">${esc(f.name)}</span>
-        <span class="lv">LV ${f.level} · Battles ${br.w}W ${br.l}L ${br.d}D · ${next}</span>
+        <span class="lv">LV ${f.level} · Battles ${br.w}W ${br.l}L ${br.d}D · ${next}${pts ? ` · <b class="pts-badge">${pts} stat point${pts > 1 ? "s" : ""} to spend</b>` : ""}</span>
         <span class="xpbar"><span style="width:${Math.round(levelProgress(f) * 100)}%"></span></span></div>
     </div>`;
     paintSprites(bar);
@@ -285,9 +341,11 @@
   function battleRunning() { return !!(S.battle && !S.battle.finished); }
   function setTab(tab) {
     if (tab === S.tab) return;
-    if (battleRunning()) { stopBattle(); toast("Battle stopped. No XP was given."); }
+    if (battleRunning()) { stopBattle(); toast(S.battle && S.battle.kind === "spar" ? "Sparring stopped." : "Battle stopped. No XP was given."); }
+    if (S.spar && tab !== "gym") S.spar = null;
     S.tab = tab;
     if (tab === "design" && !S.draft) openDesigner(S.activeId);
+    if (tab === "forge" && !S.forge) resetForge();
     render();
     window.scrollTo({ top: 0 });
   }
@@ -295,10 +353,12 @@
   function render() {
     for (const t of document.querySelectorAll(".tab")) t.setAttribute("aria-selected", String(t.dataset.tab === S.tab));
     renderActiveBar();
+    renderWallet();
     const v = $("view");
     v.onclick = v.oninput = v.onchange = null;
     if (S.tab === "roster") renderRoster(v);
     else if (S.tab === "design") renderDesigner(v);
+    else if (S.tab === "forge") renderForge(v);
     else if (S.tab === "gym") renderGym(v);
     else if (S.tab === "battle") renderBattle(v);
     else renderArena(v);
@@ -306,9 +366,12 @@
   // Re-render after background data arrives, without disturbing typing or a battle in progress.
   function softRender() {
     renderActiveBar();
-    if (S.tab === "design" || S.tab === "battle") return;
+    renderWallet();
+    if (S.tab === "design" || S.tab === "battle" || S.tab === "forge" || (S.tab === "gym" && S.spar)) return;
     render();
   }
+  const seg = (field, value, options) => `<div class="seg" role="group">${options.map(([val, label]) =>
+    `<button type="button" data-seg="${field}" data-val="${esc(val)}" aria-pressed="${String(val) === String(value)}">${label}</button>`).join("")}</div>`;
 
   // ---------- roster ----------
   function renderRoster(v) {
@@ -317,7 +380,7 @@
         <canvas data-sprite="${esc(f.id)}" width="28" height="28" aria-hidden="true"></canvas>
         <span class="name">${esc(f.name)}</span>
         <span class="lv">LV ${f.level}${published.has(f.id) ? " · IN ARENA" : ""}</span>
-        <span class="small muted">${f.moves.map((m) => E.SKILLS[m].move).join(" · ")}</span>
+        <span class="small muted">${f.moves.map((m) => esc(skillName(f, m))).join(" · ")}</span>
       </button>`).join("");
     v.innerHTML = `<div class="box">
       <h2>Your fighters</h2>
@@ -325,13 +388,14 @@
       <div class="cards">${cards}<button class="card new" type="button" data-new><b>+</b><span>New fighter</span></button></div>
     </div>
     <div class="box"><h2>How it works</h2>
-      <p class="small" style="margin:0">Each fighter is an AI agent. In a battle, Claude picks every move for both sides, guided by each fighter's
-      persona, the playbook its coach wrote, and the instincts it built in the gym. Train in the <b>Gym</b>, climb the rival ladder in
-      <b>Battle</b>, and take on other players' fighters in the <b>Arena</b>.</p></div>`;
+      <p class="small" style="margin:0">Each fighter is an AI agent. In a battle, Claude picks every action for both sides, guided by each fighter's
+      persona, playbook, battle rules and the instincts it built in the gym. Skills cost energy and can burn, stun, shield or heal.
+      Forge your own skills in the <b>Forge</b>, train in the <b>Gym</b>, climb the rival ladder in <b>Battle</b>, and take on other players in the <b>Arena</b>.
+      Winning earns Cycles, which buy gym time, compute, skills and items.</p></div>`;
     paintSprites(v);
     v.onclick = (e) => {
       const pick = e.target.closest("[data-pick]");
-      if (pick) { S.activeId = pick.dataset.pick; S.report = null; saveLocal(); render(); return; }
+      if (pick) { S.activeId = pick.dataset.pick; S.report = null; S.draft = null; saveLocal(); render(); return; }
       if (e.target.closest("[data-new]")) { openDesigner(null); S.tab = "design"; render(); }
     };
   }
@@ -347,37 +411,68 @@
     const f = id && find(id);
     S.editingId = f ? f.id : null;
     S.confirmDelete = false;
-    S.draft = f ? { name: f.name, design: { ...f.design }, personality: { ...f.personality }, moves: f.moves.slice(), persona: f.persona || "", playbook: f.playbook || "" }
-      : { name: NAMES[Math.floor(Math.random() * NAMES.length)], design: randomDesign(),
+    S.draft = f ? { name: f.name, design: { ...f.design }, personality: { ...f.personality }, moves: f.moves.slice(), custom: E.clone(f.custom || {}),
+                    persona: f.persona || "", playbook: f.playbook || "", passive: f.passive ? E.clone(f.passive) : null, item: f.item || null,
+                    stats: { ...E.statsOf(f) }, savedStats: { ...E.statsOf(f) }, respec: false, rules: E.clone(f.rules || []), level: f.level }
+      : { name: NAMES[Math.floor(Math.random() * NAMES.length)], design: randomDesign(), custom: {},
           personality: { aggression: 0.6, caution: 0.5, creativity: 0.5, loyalty: 0.4 }, moves: ["fight", "talk", "strategize", "shield"],
-          persona: "Reads the opponent for a turn, then hits the counter hard. Saves big moves for the endgame.", playbook: "" };
+          persona: "Reads the opponent for a turn, then hits the counter hard. Saves energy for big moves in the endgame.", playbook: "",
+          passive: null, item: null, stats: { power: 0, vitality: 0, speed: 0 }, savedStats: { power: 0, vitality: 0, speed: 0 }, respec: false, rules: [], level: 1 };
   }
-  const seg = (field, value, options) => `<div class="seg" role="group">${options.map(([val, label]) =>
-    `<button type="button" data-seg="${field}" data-val="${esc(val)}" aria-pressed="${String(val) === String(value)}">${label}</button>`).join("")}</div>`;
-  const TRAIT_HELP = {
-    aggression: "Starts out favoring Aggro moves.", caution: "Starts out favoring Guard moves.",
-    creativity: "Starts out favoring Mind moves.", loyalty: "Starts out favoring Social moves.",
-  };
-  function coverageNote(moves) {
-    const have = new Set(moves.map((m) => E.SKILLS[m].style));
+  const TRAIT_HELP = { aggression: "Starts out favoring Aggro skills.", caution: "Starts out favoring Guard skills.", creativity: "Starts out favoring Mind skills.", loyalty: "Starts out favoring Social skills." };
+  /** Every skill the draft could equip: basics, then library skills (with whether the level allows them). */
+  function skillPool(d) {
+    const pool = E.SKILL_NAMES.map((id) => ({ id, skill: E.BASIC[id], ok: true }));
+    for (const s of S.progress.library) if (s.kind === "active") pool.push({ id: s.id, skill: s, ok: s.budget <= E.maxSkillBudget(d.level), custom: true });
+    for (const [id, s] of Object.entries(d.custom || {})) if (!pool.some((p) => p.id === id)) pool.push({ id, skill: s, ok: true, custom: true });
+    return pool;
+  }
+  function coverageNote(d) {
+    const probe = { custom: d.custom };
+    const have = new Set(d.moves.map((m) => E.skillOf(probe, m)?.style));
     const missing = E.STYLES.filter((s) => !have.has(s));
     if (!missing.length) return `<p class="note">Covers all four styles, so it can counter anything.</p>`;
-    return `<p class="warn">${missing.map((s) => {
-      const beaten = E.STYLES.find((x) => E.BEATS[s] === x);
-      return `No ${E.STYLE_INFO[s].label} move: nothing counters ${E.STYLE_INFO[beaten].label}.`;
-    }).join(" ")}</p>`;
+    return `<p class="warn">${missing.map((s) => `No ${E.STYLE_INFO[s].label} skill: nothing counters ${E.STYLE_INFO[E.BEATS[s]].label}.`).join(" ")}</p>`;
+  }
+  function slotHtml(d, i, pool) {
+    const cur = d.moves[i];
+    const opts = (group, list) => list.length ? `<optgroup label="${group}">${list.map((p) => `<option value="${esc(p.id)}" ${p.id === cur ? "selected" : ""} ${(!p.ok || (d.moves.includes(p.id) && p.id !== cur)) ? "disabled" : ""}>${esc(p.skill.name)} · ${E.STYLE_INFO[p.skill.style].label} · ${p.skill.energy}E${p.ok ? "" : " (needs a higher level)"}</option>`).join("")}</optgroup>` : "";
+    const sk = E.skillOf({ custom: d.custom }, cur);
+    return `<div class="slot" style="--c:${STYLE_VAR[sk.style]}"><label class="lab" for="slot-${i}">Slot ${i + 1}</label>
+      <select id="slot-${i}" data-slot="${i}">${opts("Basic", pool.filter((p) => !p.custom))}${opts("Your skills", pool.filter((p) => p.custom))}</select>
+      <span class="note">${esc(E.describeSkill(sk))}</span></div>`;
+  }
+  function passiveOptions(d) {
+    const list = [...E.STARTER_PASSIVES.map((p) => ({ p, starter: true })), ...S.progress.library.filter((s) => s.kind === "passive").map((p) => ({ p }))];
+    const cur = d.passive ? d.passive.id : "";
+    return `<option value="">None</option>` + list.map(({ p, starter }) => {
+      const ok = p.budget <= E.maxPassiveBudget(d.level);
+      return `<option value="${esc(p.id)}" ${p.id === cur ? "selected" : ""} ${ok ? "" : "disabled"}>${esc(p.name)}${starter ? " (starter)" : ""}${ok ? "" : " (needs a higher level)"}</option>`;
+    }).join("");
+  }
+  function ruleRowHtml(rule, i, d) {
+    const conds = Object.entries(E.RULE_CONDITIONS).map(([k, c]) => `<option value="${k}" ${k === rule.when.kind ? "selected" : ""}>${esc(c.label)}</option>`).join("");
+    const def = E.RULE_CONDITIONS[rule.when.kind];
+    const val = typeof def.value[0] === "string"
+      ? `<select data-rule-val="${i}" aria-label="Value">${def.value.map((x) => `<option value="${x}" ${x === rule.when.value ? "selected" : ""}>${rule.when.kind === "their_last_style" ? E.STYLE_INFO[x].label : x}</option>`).join("")}</select>`
+      : `<input type="number" data-rule-val="${i}" min="${def.value[0]}" max="${def.value[1]}" step="${def.value[2]}" value="${rule.when.value}" aria-label="Value">${def.unit ? `<span class="small">${def.unit}</span>` : ""}`;
+    const actKey = rule.do.item ? "item" : rule.do.skill;
+    const acts = d.moves.map((m) => `<option value="${esc(m)}" ${m === actKey ? "selected" : ""}>use ${esc(E.skillOf({ custom: d.custom }, m).name)}</option>`).join("")
+      + `<option value="item" ${actKey === "item" ? "selected" : ""}>use my item</option>`;
+    return `<div class="rule"><span class="small">If</span><select data-rule-cond="${i}" aria-label="Condition">${conds}</select>${val}
+      <span class="small">then</span><select data-rule-act="${i}" aria-label="Action">${acts}</select>
+      <button class="btn icon" type="button" data-rule-del="${i}" aria-label="Remove rule">×</button></div>`;
   }
   function renderDesigner(v) {
     const d = S.draft, editing = S.editingId && find(S.editingId);
-    const trained = editing && editing.xp > 0;
-    const dropped = editing ? editing.moves.filter((m) => !d.moves.includes(m)) : [];
-    const skillBtns = E.STYLES.map((st) => `<div class="style-col" style="--c:${STYLE_VAR[st]}">
-        <div class="style-head"><span class="dot" aria-hidden="true"></span>${E.STYLE_INFO[st].label}</div>
-        <p class="note" style="margin:0">${E.STYLE_INFO[st].blurb}</p>
-        ${E.SKILL_NAMES.filter((s) => E.SKILLS[s].style === st).map((s) => `<button type="button" class="skill" data-skill="${s}" aria-pressed="${d.moves.includes(s)}">
-          <span><span class="mv">${E.SKILLS[s].move}</span> <span class="small muted">${s}</span></span><span class="pw">PWR ${E.SKILLS[s].power}</span></button>`).join("")}
-      </div>`).join("");
-    const canSave = d.moves.length === 4 && d.name.trim();
+    const pool = skillPool(d);
+    const points = E.statPointsFor(d.level), used = d.stats.power + d.stats.vitality + d.stats.speed;
+    const inv = S.progress.inventory;
+    const itemOpts = `<option value="">None</option>` + Object.values(E.ITEMS).map((it) => `<option value="${it.id}" ${d.item === it.id ? "selected" : ""} ${inv[it.id] > 0 || d.item === it.id ? "" : "disabled"}>${it.name} · own ${inv[it.id] || 0}</option>`).join("");
+    const statRow = (k, label, help) => `<div class="stat-row"><span><b>${label}</b> <span class="note">${help}</span></span>
+      <span class="stepper"><button class="btn icon" type="button" data-stat="${k}" data-d="-1" aria-label="Less ${label}" ${d.stats[k] <= (d.respec ? 0 : d.savedStats[k]) ? "disabled" : ""}>−</button>
+      <b class="num">${d.stats[k]}</b><button class="btn icon" type="button" data-stat="${k}" data-d="1" aria-label="More ${label}" ${used >= points ? "disabled" : ""}>+</button></span></div>`;
+    const canSave = d.name.trim() && new Set(d.moves).size === 4;
     v.innerHTML = `<div class="two">
       <div class="box">
         <h2>${editing ? "Edit fighter" : "New fighter"}</h2>
@@ -386,19 +481,41 @@
         ${!S.fighters.length ? `<p class="note">A starting design. Change anything, then create your fighter.</p>` : ""}
       </div>
       <div class="panel">
+        <div class="box"><div class="field"><label for="f-name">Name</label>
+          <input type="text" id="f-name" maxlength="16" value="${esc(d.name)}" autocomplete="off" spellcheck="false"></div></div>
         <div class="box">
-          <div class="field"><label for="f-name">Name</label>
-            <input type="text" id="f-name" maxlength="16" value="${esc(d.name)}" autocomplete="off" spellcheck="false"></div>
+          <h2>Loadout</h2>
+          <p class="note">Four skills. Each style beats the next: Aggro → Social → Mind → Guard → Aggro. Forge new skills in the Forge tab.</p>
+          <div class="slots">${[0, 1, 2, 3].map((i) => slotHtml(d, i, pool)).join("")}</div>
+          ${coverageNote(d)}
+          <div class="grid2">
+            <div class="field"><label class="lab" for="f-passive">Passive</label><select id="f-passive">${passiveOptions(d)}</select>
+              <span class="note">${d.passive ? esc(E.describeSkill(d.passive)) : "Always-on bonus, like regenerating HP. Starters are free."}</span></div>
+            <div class="field"><label class="lab" for="f-item">Item (one use per battle)</label><select id="f-item">${itemOpts}</select>
+              <span class="note">${d.item ? esc(E.ITEMS[d.item].blurb) : "Buy items in the Forge tab."} Using it takes your turn but acts first.</span></div>
+          </div>
         </div>
+        <div class="box">
+          <h2>Battle rules · ${d.rules.length} of ${E.MAX_RULES}</h2>
+          <p class="note">If-then rules your fighter always follows, before Claude or instincts decide. They also save Claude requests.</p>
+          <div class="rules">${d.rules.map((r, i) => ruleRowHtml(r, i, d)).join("") || `<p class="note">No rules yet. Example: if my HP is below 30%, use my item.</p>`}</div>
+          ${d.rules.length < E.MAX_RULES ? `<div class="row"><button class="btn" type="button" id="add-rule">Add rule</button></div>` : ""}
+        </div>
+        ${editing ? `<div class="box">
+          <h2>Stats · ${points - used} of ${points} points free</h2>
+          <p class="note">You get a point every level. Moving points you've already spent needs a reset (${ECON.PRICES.respec} Cycles).</p>
+          ${statRow("power", "Power", "+3% damage")}${statRow("vitality", "Vitality", "+4 HP")}${statRow("speed", "Speed", "acts first on ties")}
+          ${!d.respec && (d.savedStats.power + d.savedStats.vitality + d.savedStats.speed) > 0 ? `<div class="row"><button class="btn" type="button" id="respec">Reset points · ${ECON.PRICES.respec} Cycles</button></div>` : ""}
+        </div>` : ""}
         <div class="box">
           <h2>Mind</h2>
           <div class="field"><label for="f-persona">Persona: how your fighter thinks</label>
-            <textarea id="f-persona" maxlength="${E.PERSONA_MAX}" rows="3" placeholder="e.g. Patient. Opens with defense, punishes repetition, goes all in when points double.">${esc(d.persona)}</textarea>
+            <textarea id="f-persona" maxlength="${E.PERSONA_MAX}" rows="3">${esc(d.persona)}</textarea>
             <span class="count" id="c-persona">${d.persona.length} / ${E.PERSONA_MAX}</span></div>
           <div class="field"><label for="f-playbook">Playbook: lessons from training</label>
-            <textarea id="f-playbook" maxlength="${E.PLAYBOOK_MAX}" rows="5" placeholder="Your coach writes this after gym sessions and battles. You can edit it too.">${esc(d.playbook)}</textarea>
+            <textarea id="f-playbook" maxlength="${E.PLAYBOOK_MAX}" rows="5" placeholder="Your coach writes this. You can edit it too.">${esc(d.playbook)}</textarea>
             <span class="count" id="c-playbook">${d.playbook.length} / ${E.PLAYBOOK_MAX}</span></div>
-          <p class="note">Claude reads both before every move your fighter makes.</p>
+          <p class="note">Claude reads both before every action your fighter takes.</p>
         </div>
         <div class="box">
           <h2>Look</h2>
@@ -416,19 +533,11 @@
           </div>
         </div>
         <div class="box">
-          <h2>Instincts</h2>
-          <p class="note">Personality sets your fighter's starting instincts. Gym practice then trains them.</p>
+          <h2>Starting instincts</h2>
           <div class="grid2">${E.TRAITS.map((t) => `<div class="trait">
             <div class="top-line"><label for="t-${t}">${t[0].toUpperCase() + t.slice(1)}</label><b id="tv-${t}">${Math.round(d.personality[t] * 100)}</b></div>
             <input type="range" id="t-${t}" data-trait="${t}" min="0" max="1" step="0.05" value="${d.personality[t]}">
             <span class="note">${TRAIT_HELP[t]}</span></div>`).join("")}</div>
-        </div>
-        <div class="box">
-          <h2>Moves · ${d.moves.length} of 4 picked</h2>
-          <p class="note">Each style beats the next: Aggro → Social → Mind → Guard → Aggro. Effective hits do double damage, resisted hits half.</p>
-          <div class="styles">${skillBtns}</div>
-          ${d.moves.length === 4 ? coverageNote(d.moves) : `<p class="warn">Pick ${4 - d.moves.length} more.</p>`}
-          ${trained && dropped.length ? `<p class="warn">${dropped.map((m) => E.SKILLS[m].move).join(" and ")} will lose ${dropped.length > 1 ? "their" : "its"} training. Moves you keep stay trained.</p>` : ""}
         </div>
         <div class="box">
           <div class="row">
@@ -437,9 +546,9 @@
               ? `<span class="small">Delete ${esc(editing.name)} and all its training?</span><button class="btn danger" type="button" id="del-yes">Delete</button><button class="btn" type="button" id="del-no">Keep</button>`
               : `<button class="btn danger" type="button" id="del">Delete fighter</button>`) : ""}
           </div>
-          ${d.moves.length === 4 ? `<div class="field"><span class="lab">Register this design on aipvp</span>
-            <div class="code"><pre id="cmd">${esc(E.aipvpCommand({ name: d.name || "FIGHTER", moves: d.moves, personality: d.personality }))}</pre><button class="btn" type="button" id="copy">Copy</button></div>
-            <span class="note">Creates the agent on aipvp.io with these moves and personality. Training here stays in Fighter Lab.</span></div>` : ""}
+          <div class="field"><span class="lab">Register this design on aipvp</span>
+            <div class="code"><pre id="cmd">${esc(E.aipvpCommand({ name: d.name || "FIGHTER", moves: d.moves, custom: d.custom, personality: d.personality }))}</pre><button class="btn" type="button" id="copy">Copy</button></div>
+            <span class="note">aipvp.io has its own skills, so forged skills map to the closest basic one there. Training stays in Fighter Lab.</span></div>
         </div>
       </div>
     </div>`;
@@ -450,12 +559,9 @@
     const c = v.querySelector('canvas[data-sprite="draft"]');
     if (c) SP.draw(c, { id: S.editingId || "draft-" + S.draft.name, design: S.draft.design });
   }
-  function refreshCommand() {
-    const pre = $("cmd"), d = S.draft;
-    if (pre && d.moves.length === 4) pre.textContent = E.aipvpCommand({ name: d.name || "FIGHTER", moves: d.moves, personality: d.personality });
-  }
   function bindDesigner(v) {
     const d = S.draft;
+    const rerender = () => { const y = window.scrollY; renderDesigner(v); window.scrollTo({ top: y }); };
     v.onclick = async (e) => {
       const sg = e.target.closest("[data-seg]");
       if (sg) {
@@ -464,49 +570,62 @@
         for (const b of sg.parentElement.children) b.setAttribute("aria-pressed", String(b === sg));
         refreshPreview(v); return;
       }
-      const sk = e.target.closest("[data-skill]");
-      if (sk) {
-        const s = sk.dataset.skill, i = d.moves.indexOf(s);
-        if (i >= 0) d.moves.splice(i, 1);
-        else if (d.moves.length < 4) d.moves.push(s);
-        else { toast("A fighter has 4 moves. Unpick one first."); return; }
-        renderDesigner(v); return;
-      }
+      const st = e.target.closest("[data-stat]");
+      if (st) { d.stats[st.dataset.stat] = Math.max(0, d.stats[st.dataset.stat] + Number(st.dataset.d)); rerender(); return; }
+      const del = e.target.closest("[data-rule-del]");
+      if (del) { d.rules.splice(+del.dataset.ruleDel, 1); rerender(); return; }
       const id = e.target.id;
-      if (id === "randomize") { d.design = randomDesign(); renderDesigner(v); return; }
+      if (id === "add-rule") { d.rules.push({ when: { kind: "my_hp_below", value: 30 }, do: d.item ? { item: true } : { skill: d.moves[0] } }); rerender(); return; }
+      if (id === "respec") {
+        if (pay(ECON.PRICES.respec, `Stat reset for ${d.name}`)) { d.respec = true; d.stats = { power: 0, vitality: 0, speed: 0 }; toast("Points reset. Spend them again, then save."); rerender(); }
+        return;
+      }
+      if (id === "randomize") { d.design = randomDesign(); rerender(); return; }
       if (id === "copy") {
         try { await navigator.clipboard.writeText($("cmd").textContent); toast("Copied."); }
         catch { const r = document.createRange(); r.selectNodeContents($("cmd")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); toast("Selected. Copy it from here."); }
         return;
       }
-      if (id === "del") { S.confirmDelete = true; renderDesigner(v); return; }
-      if (id === "del-no") { S.confirmDelete = false; renderDesigner(v); return; }
+      if (id === "del") { S.confirmDelete = true; rerender(); return; }
+      if (id === "del-no") { S.confirmDelete = false; rerender(); return; }
       if (id === "del-yes") {
         const name = find(S.editingId)?.name;
         deleteFighter(S.editingId);
         S.draft = null; S.editingId = null; S.tab = "roster"; render(); toast(`${name} deleted.`); return;
       }
-      if (id === "save") {
-        const name = d.name.trim().toUpperCase();
-        try {
-          const editing = S.editingId && find(S.editingId);
-          let f = editing ? E.redesign(editing, { name, design: d.design, personality: d.personality, moves: d.moves })
-                          : E.upgradeFighter(E.createFighter({ name, design: d.design, personality: d.personality, moves: d.moves }));
-          f.persona = E.cleanText(d.persona, E.PERSONA_MAX, false);
-          f.playbook = E.cleanText(d.playbook, E.PLAYBOOK_MAX, true);
-          f = saveFighter(f);              // returns at once; the account copy saves in the background
-          S.activeId = f.id; S.draft = null; S.editingId = null; S.report = null; saveLocal();
-          toast(editing ? "Saved." : `${f.name} is ready. Take it to the Gym.`);
-          S.tab = editing ? "roster" : "gym"; render();
-        } catch (err) { toast(err.message); }
+      if (id === "save") saveDesign();
+    };
+    v.onchange = (e) => {
+      const t = e.target;
+      if (t.dataset.slot !== undefined) {
+        const i = +t.dataset.slot, val = t.value;
+        const lib = S.progress.library.find((s) => s.id === val);
+        if (lib) d.custom[val] = E.clone(lib);
+        const old = d.moves[i];
+        d.moves[i] = val;
+        d.rules = d.rules.map((r) => (r.do.skill === old ? { ...r, do: { skill: val } } : r));
+        rerender(); return;
       }
+      if (t.id === "f-passive") {
+        d.passive = t.value ? E.clone([...E.STARTER_PASSIVES, ...S.progress.library].find((p) => p.id === t.value)) : null;
+        rerender(); return;
+      }
+      if (t.id === "f-item") { d.item = t.value || null; rerender(); return; }
+      if (t.dataset.ruleCond !== undefined) {
+        const r = d.rules[+t.dataset.ruleCond], def = E.RULE_CONDITIONS[t.value];
+        r.when = { kind: t.value, value: def.value[0] === undefined ? 0 : typeof def.value[0] === "string" ? def.value[0] : Math.round((def.value[0] + def.value[1]) / 2 / def.value[2]) * def.value[2] };
+        rerender(); return;
+      }
+      if (t.dataset.ruleVal !== undefined) { const r = d.rules[+t.dataset.ruleVal]; r.when.value = typeof E.RULE_CONDITIONS[r.when.kind].value[0] === "string" ? t.value : Number(t.value); return; }
+      if (t.dataset.ruleAct !== undefined) { d.rules[+t.dataset.ruleAct].do = t.value === "item" ? { item: true } : { skill: t.value }; return; }
+      if (t.dataset.trait || t.id === "f-name") { const pre = $("cmd"); if (pre) pre.textContent = E.aipvpCommand({ name: d.name || "FIGHTER", moves: d.moves, custom: d.custom, personality: d.personality }); }
     };
     v.oninput = (e) => {
       const t = e.target;
       if (t.id === "f-name") {
         d.name = t.value.toUpperCase().replace(/[^A-Z0-9 '\-]/g, "");
         if (t.value !== d.name) t.value = d.name;
-        $("save").disabled = d.moves.length !== 4 || !d.name.trim(); return;
+        $("save").disabled = !d.name.trim(); return;
       }
       if (t.id === "f-persona" || t.id === "f-playbook") {
         const key = t.id === "f-persona" ? "persona" : "playbook";
@@ -520,7 +639,209 @@
       if (t.id === "f-size") { d.design.size = +t.value; refreshPreview(v); return; }
       if (t.dataset.trait) { d.personality[t.dataset.trait] = +t.value; $("tv-" + t.dataset.trait).textContent = Math.round(t.value * 100); }
     };
-    v.onchange = (e) => { if (e.target.dataset.trait || e.target.id === "f-name") refreshCommand(); };
+  }
+  function saveDesign() {
+    const d = S.draft, name = d.name.trim().toUpperCase();
+    try {
+      const editing = S.editingId && find(S.editingId);
+      let f = editing
+        ? E.redesign(editing, { name, design: d.design, personality: d.personality, moves: d.moves, custom: d.custom, passive: d.passive, item: d.item })
+        : E.upgradeFighter(E.createFighter({ name, design: d.design, personality: d.personality, moves: d.moves, custom: d.custom, passive: d.passive, item: d.item }));
+      if (editing) f = E.setStats(f, d.stats);
+      f.rules = E.sanitizeRules(d.rules, f.moves);
+      f.persona = E.cleanText(d.persona, E.PERSONA_MAX, false);
+      f.playbook = E.cleanText(d.playbook, E.PLAYBOOK_MAX, true);
+      f = saveFighter(f);              // returns at once; the account copy saves in the background
+      S.activeId = f.id; S.draft = null; S.editingId = null; S.report = null; saveLocal();
+      toast(editing ? "Saved." : `${f.name} is ready. Take it to the Gym.`);
+      S.tab = editing ? "roster" : "gym"; render();
+    } catch (err) { toast(err.message); }
+  }
+
+  // ---------- forge: build or describe a skill; wallet; library; shop ----------
+  function forgeLevel() { return active()?.level || 1; }
+  function resetForge(kind = "active") {
+    // Defaults are the two examples from the design brief: a fireball that burns, and a passive that heals every two turns.
+    S.forge = { mode: "build", kind, name: kind === "passive" ? "LIFE BLOOM" : "FIREBALL", style: kind === "passive" ? "guard" : "aggro", element: kind === "passive" ? "spirit" : "fire",
+                effects: kind === "passive" ? [{ type: "regen", heal: 1, every: 2 }] : [{ type: "damage", power: 3, hits: 1 }, { type: "burn", chance: 0.3, damage: 2, turns: 3 }],
+                cheaper: 0, desc: "", why: "", note: "", busy: false };
+  }
+  /** Fill parameters a skill file left out (damage without "hits" means one hit) so every slider has a value. */
+  function withDefaults(e, kind) {
+    const def = (kind === "passive" ? E.PASSIVE_EFFECTS : E.EFFECTS)[e.type];
+    const out = { ...e };
+    if (def) for (const [k, spec] of Object.entries(def.params)) if (out[k] === undefined) out[k] = spec[0];
+    return out;
+  }
+  function defaultEffect(type, kind) {
+    const def = (kind === "passive" ? E.PASSIVE_EFFECTS : E.EFFECTS)[type], e = { type };
+    for (const [k, spec] of Object.entries(def.params)) e[k] = typeof spec[0] === "string" ? spec[0] : spec[0] + Math.round((spec[1] - spec[0]) / spec[2] / 3) * spec[2];
+    return e;
+  }
+  function forgePreview() {
+    const fz = S.forge;
+    return E.validateSkill({ name: fz.name, kind: fz.kind, style: fz.style, element: fz.element, effects: fz.effects, cheaper: fz.cheaper }, { level: forgeLevel() });
+  }
+  function effectRowHtml(e, i, kind) {
+    const table = kind === "passive" ? E.PASSIVE_EFFECTS : E.EFFECTS;
+    const types = Object.entries(table).map(([k, def]) => `<option value="${k}" ${k === e.type ? "selected" : ""}>${def.label}</option>`).join("");
+    const params = Object.entries(table[e.type].params).map(([k, spec]) => {
+      if (typeof spec[0] === "string") return `<label class="param"><span class="lab">${k}</span><select data-fx="${i}" data-k="${k}">${spec.map((x) => `<option value="${x}" ${x === e[k] ? "selected" : ""}>${x}</option>`).join("")}</select></label>`;
+      return `<label class="param"><span class="lab">${k} <b data-fxv="${i}-${k}">${e[k]}</b></span><input type="range" data-fx="${i}" data-k="${k}" min="${spec[0]}" max="${spec[1]}" step="${spec[2]}" value="${e[k]}"></label>`;
+    }).join("");
+    return `<div class="fx-row"><div class="row"><select data-fx-type="${i}" aria-label="Effect">${types}</select>
+      <button class="btn icon" type="button" data-fx-del="${i}" aria-label="Remove effect">×</button></div><div class="params">${params}</div></div>`;
+  }
+  function priceHtml() {
+    const v = forgePreview(), fz = S.forge, lv = forgeLevel();
+    if (!v.skill) return `<p class="warn">${esc(v.errors.join(" "))}</p>`;
+    const s = v.skill, cap = s.kind === "passive" ? E.maxPassiveBudget(lv) : E.maxSkillBudget(lv);
+    const pct = Math.min(100, (s.budget / cap) * 100);
+    return `<div class="price">
+      <div class="meter ${v.overBudget ? "over" : ""}"><span style="width:${pct}%"></span></div>
+      <p class="small" style="margin:0">Power <b>${s.budget}</b> of ${cap} allowed at level ${lv}${s.kind === "active" ? ` · <b>${s.energy} energy</b>${s.cooldown ? ` · cooldown ${s.cooldown}` : ""}${s.priority ? " · acts first" : ""}` : ""}</p>
+      <p class="small" style="margin:0">${esc(E.describeSkill(s))}</p>
+      ${v.errors.length ? `<p class="warn" style="margin:0">${esc(v.errors.join(" "))}</p>` : ""}
+      ${fz.note ? `<p class="note" style="margin:0">${esc(fz.note)}</p>` : ""}
+    </div>`;
+  }
+  function renderForge(v) {
+    const fz = S.forge, w = S.progress.wallet, lv = forgeLevel();
+    const q = ECON.gymQuote(w, 0);
+    const ledger = w.ledger.slice(-10).reverse().map((e) => `<li><span>${esc(e.reason)}</span><b class="${e.amount > 0 ? "plus" : "minus"}">${e.amount > 0 ? "+" : ""}${e.amount}</b></li>`).join("");
+    const v0 = forgePreview(), price = v0.skill ? ECON.forgeCost(v0.skill) : 0;
+    const aiOk = S.ai.sample && !S.ai.off;
+    const lib = S.progress.library.map((s) => `<div class="lib-item" style="--c:${STYLE_VAR[s.style]}"><div><b>${esc(s.name)}</b> <span class="tag">${s.kind === "passive" ? "PASSIVE" : E.STYLE_INFO[s.style].label.toUpperCase()}</span>
+      <p class="small" style="margin:2px 0 0">${esc(E.describeSkill(s))}</p></div><button class="btn icon" type="button" data-lib-del="${esc(s.id)}" aria-label="Delete ${esc(s.name)}">×</button></div>`).join("");
+    const shop = Object.values(E.ITEMS).map((it) => `<div class="shop-item"><div><b>${it.name}</b><p class="small" style="margin:2px 0 0">${it.blurb} You own ${S.progress.inventory[it.id] || 0}.</p></div>
+      <button class="btn" type="button" data-buy="${it.id}">Buy · ${it.price}</button></div>`).join("");
+    v.innerHTML = `<div class="two">
+      <div class="panel">
+        <div class="box">
+          <h2>Wallet</h2>
+          <div class="outcome">${balance()} Cycles</div>
+          <p class="small" style="margin:0">Earn Cycles by beating rivals and arena opponents. Spend them on gym time (${q.freeLeft} of ${ECON.FREE_ROUNDS_PER_DAY} free rounds left today), compute, skills and items.
+          Cycles have no cash value and can't be transferred.</p>
+          <ul class="ledger">${ledger}</ul>
+        </div>
+        <div class="box">
+          <h2>Shop</h2>
+          <div class="shop">${shop}</div>
+          <p class="note">Items are used up when your fighter uses them in a real battle. Practice in the gym doesn't use them.</p>
+        </div>
+        <div class="box">
+          <h2>Your skills · ${S.progress.library.length} of ${LIBRARY_MAX}</h2>
+          ${lib || `<p class="note">Forged skills appear here. Equip them in the Design tab.</p>`}
+        </div>
+      </div>
+      <div class="panel">
+        <div class="box">
+          <h2>Skill forge</h2>
+          ${seg("forge-mode", fz.mode, [["build", "Build it"], ["describe", "Describe it"]])}
+          ${fz.mode === "describe" ? `
+            <div class="field"><label for="fz-desc">Describe the skill</label>
+              <textarea id="fz-desc" rows="3" maxlength="400" placeholder="Shoots fireballs that set the enemy on fire">${esc(fz.desc)}</textarea></div>
+            <div class="field"><span class="lab">Kind</span>${seg("forge-kind", fz.kind, [["active", "Skill"], ["passive", "Passive"]])}</div>
+            <div class="row"><button class="btn primary" type="button" id="fz-draft" ${aiOk && !fz.busy ? "" : "disabled"}>${fz.busy ? "Drafting…" : `Draft with Claude · ${ECON.PRICES.draft} Cycles`}</button></div>
+            <p class="note">${aiOk ? "Claude turns your words into a skill file. The game then checks it, scales it to your level and sets its energy cost. You only pay if the draft works." : "Drafting needs Claude, which isn't available in this view. Build it by hand instead."}</p>
+          ` : `
+            <div class="grid2">
+              <div class="field"><label for="fz-name">Name</label><input type="text" id="fz-name" maxlength="16" value="${esc(fz.name)}"></div>
+              <div class="field"><span class="lab">Kind</span>${seg("forge-kind", fz.kind, [["active", "Skill"], ["passive", "Passive"]])}</div>
+              <div class="field"><label class="lab" for="fz-style">Style</label><select id="fz-style">${E.STYLES.map((s) => `<option value="${s}" ${s === fz.style ? "selected" : ""}>${E.STYLE_INFO[s].label}</option>`).join("")}</select></div>
+              <div class="field"><label class="lab" for="fz-element">Element (look)</label><select id="fz-element">${E.ELEMENTS.map((x) => `<option value="${x}" ${x === fz.element ? "selected" : ""}>${x}</option>`).join("")}</select></div>
+            </div>
+            <div class="fx-list">${fz.effects.map((e, i) => effectRowHtml(e, i, fz.kind)).join("")}</div>
+            ${fz.effects.length < 3 ? `<div class="row"><button class="btn" type="button" id="fz-add">Add effect</button></div>` : ""}
+            ${fz.kind === "active" ? `<div class="field"><span class="lab">Make it cheaper (lower energy, longer cooldown)</span>${seg("forge-cheaper", fz.cheaper, [[0, "No"], [1, "−1 energy"], [2, "−2 energy"]])}</div>` : ""}
+            ${fz.why ? `<p class="small"><b>Claude:</b> ${esc(fz.why)}</p>` : ""}
+            <div id="fz-price">${priceHtml()}</div>
+            <div class="row"><button class="btn primary" type="button" id="fz-forge" ${v0.skill && !v0.overBudget ? "" : "disabled"}>Forge · ${price} Cycles</button></div>
+            <p class="note">The power limit grows with your active fighter's level (now ${lv}). The game sets energy cost and cooldown from the skill's power.</p>
+          `}
+        </div>
+      </div>
+    </div>`;
+    bindForge(v);
+  }
+  function bindForge(v) {
+    const fz = S.forge;
+    const rerender = () => { const y = window.scrollY; renderForge(v); window.scrollTo({ top: y }); };
+    const reprice = () => { const p = $("fz-price"); if (p) p.innerHTML = priceHtml(); const b = $("fz-forge"); const pv = forgePreview(); if (b) { b.disabled = !(pv.skill && !pv.overBudget); b.textContent = `Forge · ${pv.skill ? ECON.forgeCost(pv.skill) : 0} Cycles`; } };
+    v.onclick = async (e) => {
+      const sg = e.target.closest("[data-seg]");
+      if (sg) {
+        const k = sg.dataset.seg, val = sg.dataset.val;
+        if (k === "forge-mode") fz.mode = val;
+        if (k === "forge-kind" && val !== fz.kind) { const desc = fz.desc, mode = fz.mode; resetForge(val); S.forge.desc = desc; S.forge.mode = mode; }
+        if (k === "forge-cheaper") fz.cheaper = +val;
+        rerender(); return;
+      }
+      const buy = e.target.closest("[data-buy]");
+      if (buy) {
+        const it = E.ITEMS[buy.dataset.buy];
+        if (pay(it.price, `Bought ${it.name}`)) { S.progress.inventory[it.id] = (S.progress.inventory[it.id] || 0) + 1; saveProgress(); toast(`${it.name} bought.`); rerender(); }
+        return;
+      }
+      const libDel = e.target.closest("[data-lib-del]");
+      if (libDel) {
+        const id = libDel.dataset.libDel;
+        if (S.fighters.some((f) => f.moves.includes(id) || (f.passive && f.passive.id === id))) { toast("A fighter has this equipped. Unequip it in Design first."); return; }
+        S.progress.library = S.progress.library.filter((s) => s.id !== id); saveProgress(); rerender(); return;
+      }
+      const fxDel = e.target.closest("[data-fx-del]");
+      if (fxDel) { fz.effects.splice(+fxDel.dataset.fxDel, 1); fz.note = ""; rerender(); return; }
+      if (e.target.id === "fz-add") {
+        const table = fz.kind === "passive" ? E.PASSIVE_EFFECTS : E.EFFECTS;
+        const t = Object.keys(table).find((k) => !fz.effects.some((x) => x.type === k));
+        fz.effects.push(defaultEffect(t, fz.kind)); rerender(); return;
+      }
+      if (e.target.id === "fz-forge") {
+        const pv = forgePreview();
+        if (!pv.skill || pv.overBudget) return;
+        if (S.progress.library.length >= LIBRARY_MAX) { toast(`Your library holds ${LIBRARY_MAX} skills. Delete one first.`); return; }
+        const cost = ECON.forgeCost(pv.skill);
+        if (!pay(cost, `Forged ${pv.skill.name}`)) return;
+        const skill = { ...pv.skill, id: E.newId(Math.random, "sk_") };
+        S.progress.library.push(skill); saveProgress();
+        toast(`${skill.name} forged. Equip it in the Design tab.`);
+        resetForge(fz.kind); rerender(); return;
+      }
+      if (e.target.id === "fz-draft") await draftWithClaude(rerender);
+    };
+    v.oninput = (e) => {
+      const t = e.target;
+      if (t.id === "fz-desc") { fz.desc = t.value; return; }
+      if (t.id === "fz-name") { fz.name = t.value.toUpperCase().replace(/[^A-Z0-9 '\-]/g, ""); if (t.value !== fz.name) t.value = fz.name; reprice(); return; }
+      if (t.dataset.fx !== undefined && t.type === "range") {
+        fz.effects[+t.dataset.fx][t.dataset.k] = Number(t.value);
+        const lab = v.querySelector(`[data-fxv="${t.dataset.fx}-${t.dataset.k}"]`); if (lab) lab.textContent = t.value;
+        fz.note = ""; reprice();
+      }
+    };
+    v.onchange = (e) => {
+      const t = e.target;
+      if (t.dataset.fxType !== undefined) { fz.effects[+t.dataset.fxType] = defaultEffect(t.value, fz.kind); rerender(); return; }
+      if (t.dataset.fx !== undefined && t.tagName === "SELECT") { fz.effects[+t.dataset.fx][t.dataset.k] = t.value; reprice(); return; }
+      if (t.id === "fz-style") { fz.style = t.value; reprice(); return; }
+      if (t.id === "fz-element") { fz.element = t.value; return; }
+    };
+  }
+  async function draftWithClaude(rerender) {
+    const fz = S.forge;
+    if (!fz.desc.trim()) { toast("Describe the skill first."); return; }
+    if (!ECON.canAfford(S.progress.wallet, ECON.PRICES.draft)) { toast(`Drafting costs ${ECON.PRICES.draft} Cycles.`); return; }
+    fz.busy = true; rerender();
+    try {
+      const d = await A.draftSkill(S.ai.sample, fz.desc, fz.kind, forgeLevel());
+      pay(ECON.PRICES.draft, "Claude drafted a skill");      // only charged when the draft works
+      Object.assign(fz, { mode: "build", name: d.skill.name, style: d.skill.style, element: d.skill.element, effects: d.skill.effects.map((x) => withDefaults(x, fz.kind)),
+                          cheaper: 0, why: d.why, note: d.scaled ? d.errors[0] : "" });
+    } catch (e) {
+      noteAiError(e && e.code);
+      toast(e && e.message ? e.message : "The draft didn't work. Try describing it differently.");
+    }
+    fz.busy = false; rerender();
   }
 
   // ---------- AI availability ----------
@@ -529,8 +850,8 @@
     if (!S.ai.ready) return "Checking whether Claude is available…";
     if (!S.ai.sample) return "Claude isn't available in this view, so battles run on instincts. Open the game on claude.ai or in the Claude app to use AI battles.";
     if (S.ai.off) return S.ai.reason;
-    if (!S.aiOn) return "AI is off: battles run on instincts and use no Claude requests.";
-    return "Claude plays every move for both fighters: about 24 short requests from your Claude account per battle. You'll be asked to allow it the first time.";
+    if (!S.aiOn) return "AI is off: battles run on instincts and rules, and use no Claude requests.";
+    return "Claude plays every action for both fighters: up to 24 short requests from your Claude account per battle. You'll be asked to allow it the first time.";
   }
   function refreshAiUi() {
     const sw = $("ai-switch"); if (sw) { sw.setAttribute("aria-checked", String(aiUsable())); sw.disabled = !(S.ai.sample && !S.ai.off); }
@@ -540,60 +861,44 @@
     if (PERMANENT_AI_CODES.has(code)) { S.ai.off = true; S.ai.reason = A.REASON_TEXT[code] || A.REASON_TEXT.unavailable; }
   }
 
-  // ---------- coach ----------
-  // Gym sessions come in bursts: wait until training pauses, then review them all in one request.
-  let coachTimer = 0;
-  function coachSoon(id, summary) {
-    if (!aiUsable()) return;
+  // ---------- coach (a paid review on request) ----------
+  function queueReview(id, summary) {
     const prev = S.coach.pending && S.coach.pending.id === id ? S.coach.pending.summary + "\n\n" : "";
     S.coach.pending = { id, summary: (prev + summary).slice(-3000) };
     renderCoachBox();
-    clearTimeout(coachTimer);
-    coachTimer = setTimeout(() => {
-      if (S.coach.busy || battleRunning()) return;          // picked up when the current review or battle ends
-      const next = S.coach.pending; S.coach.pending = null;
-      if (next) coachAfter(next.id, next.summary);
-    }, 3000);
   }
-  function coachAfter(id, summary) {
-    if (!aiUsable()) return;
-    if (S.coach.busy || battleRunning()) {
-      const prev = S.coach.pending && S.coach.pending.id === id ? S.coach.pending.summary + "\n\n" : "";
-      S.coach.pending = { id, summary: (prev + summary).slice(-3000) };
-      return;
-    }
-    const f = find(id);
-    if (!f) return;
-    S.coach = { busy: true, forId: id, comment: "", playbook: "", error: "", pending: null };
+  function askCoach() {
+    const p = S.coach.pending, f = p && find(p.id);
+    if (!f || S.coach.busy) return;
+    if (!aiUsable()) { toast("The coach needs Claude, which isn't available right now."); return; }
+    if (!pay(ECON.PRICES.coach, `Coach review for ${f.name}`)) return;
+    S.coach = { busy: true, forId: f.id, comment: "", playbook: "", error: "", pending: null };
     renderCoachBox();
-    A.coach(S.ai.sample, f, summary).then((out) => {
-      const latest = find(id);
-      if (latest) saveFighter({ ...latest, playbook: out.playbook });   // only the playbook changes
+    A.coach(S.ai.sample, f, p.summary).then((out) => {
+      const latest = find(f.id);
+      if (latest) saveFighter({ ...latest, playbook: out.playbook });
       S.coach = { ...S.coach, busy: false, comment: out.comment, playbook: out.playbook };
     }, (e) => {
       const code = e && e.code;
       noteAiError(code);
-      const msg = code === "rate_limited" ? "The coach is busy right now (rate limited). It will review your next session."
-        : code === "not_granted" ? "The coach needs permission to use Claude." : "The coach couldn't review this one.";
-      S.coach = { ...S.coach, busy: false, error: msg };
-    }).finally(() => {
-      renderCoachBox(); renderActiveBar();
-      const next = S.coach.pending;
-      if (next) { S.coach.pending = null; setTimeout(() => coachAfter(next.id, next.summary), 500); }
-    });
+      earn(ECON.PRICES.coach, "Refund: coach review failed");
+      S.coach = { ...S.coach, busy: false, pending: p, error: code === "rate_limited" ? "The coach is busy (rate limited). You weren't charged; try again later." : "The coach couldn't review this one. You weren't charged." };
+    }).finally(() => { renderCoachBox(); renderActiveBar(); });
   }
   function coachHtml() {
     const c = S.coach, f = active();
     if (!f) return "";
-    if (!c.busy && c.pending && c.pending.id === f.id) return `<div class="coach"><span class="lab">Coach review</span><span class="small muted">The coach will review your training when you take a short break.</span></div>`;
-    if (c.forId !== f.id) return "";
-    if (c.busy) return `<div class="coach"><span class="lab">Coach review</span><span class="dots">Reviewing the session</span></div>`;
-    if (c.error) return `<div class="coach"><span class="lab">Coach review</span><span class="small">${esc(c.error)}</span></div>`;
-    if (c.playbook) return `<div class="coach"><span class="lab">Coach review</span>${c.comment ? `<span class="small"><b>${esc(c.comment)}</b></span>` : ""}
-      <span class="small muted">New playbook (your fighter reads this before every move):</span><pre>${esc(c.playbook)}</pre></div>`;
-    return "";
+    const ask = c.pending && c.pending.id === f.id && !c.busy
+      ? `<div class="row"><button class="btn" type="button" id="ask-coach" ${aiUsable() ? "" : "disabled"}>Ask the coach to review · ${ECON.PRICES.coach} Cycles</button></div>` : "";
+    if (c.busy && c.forId === f.id) return `<div class="coach"><span class="lab">Coach review</span><span class="dots">Reviewing</span></div>`;
+    let body = "";
+    if (c.forId === f.id && c.error) body = `<span class="small">${esc(c.error)}</span>`;
+    else if (c.forId === f.id && c.playbook) body = `${c.comment ? `<span class="small"><b>${esc(c.comment)}</b></span>` : ""}<span class="small muted">New playbook (read before every action):</span><pre>${esc(c.playbook)}</pre>`;
+    if (!body && !ask) return "";
+    return `<div class="coach"><span class="lab">Coach review</span>${body}${ask || (body ? "" : "")}</div>`;
   }
-  function renderCoachBox() { const el = $("coach-box"); if (el) el.innerHTML = coachHtml(); }
+  function renderCoachBox() { for (const el of document.querySelectorAll("[data-coach-box]")) el.innerHTML = coachHtml(); }
+  document.addEventListener("click", (e) => { if (e.target.id === "ask-coach") askCoach(); });
 
   // ---------- gym ----------
   function needFighter(v, what) {
@@ -612,8 +917,11 @@
   function renderGym(v) {
     const f = active();
     if (!f) return needFighter(v, "train");
+    if (S.spar) return renderSpar(v);
     const partner = E.PARTNERS.find((p) => p.id === S.partnerId);
     const rep = S.report && S.report.fighterId === f.id ? S.report : null;
+    const q = ECON.gymQuote(S.progress.wallet, S.reps);
+    const costNote = q.cost ? `${q.free} free, then ${q.paid} at ${ECON.ROUND_COST} Cycle each: <b>${q.cost} Cycles</b>.` : `Free (${q.freeLeft} free rounds left today after this).`;
     v.innerHTML = `<div class="two">
       <div class="panel">
         <div class="box">
@@ -621,11 +929,12 @@
           <div class="partners">${partnerCards(f.level, S.partnerId)}</div>
           <p class="note">${esc(partner.blurb)}</p>
           <div class="field"><span class="lab">Rounds</span>${seg("reps", S.reps, [[1, "1"], [10, "10"], [50, "50"]])}</div>
-          <div class="row"><button class="btn primary" type="button" id="train">Train ${S.reps} round${S.reps > 1 ? "s" : ""}</button></div>
-          <p class="note">Practice is instant and uses no Claude requests. It builds XP, mastery and instincts. ${aiUsable() ? "Afterwards your AI coach rewrites the playbook." : ""}</p>
+          <div class="row"><button class="btn primary" type="button" id="train">Train ${S.reps} round${S.reps > 1 ? "s" : ""}${q.cost ? ` · ${q.cost} Cycles` : ""}</button>
+            <button class="btn" type="button" id="spar">Spar by hand</button></div>
+          <p class="note">${costNote} Practice is instant and uses no Claude: it builds XP, mastery and instincts. In <b>Spar by hand</b> you choose each action and your fighter's instincts learn by copying you (free, double XP).</p>
         </div>
         ${rep ? reportBox(rep) : ""}
-        <div id="coach-box">${coachHtml()}</div>
+        <div data-coach-box>${coachHtml()}</div>
       </div>
       <div class="panel">
         <div class="box">
@@ -639,7 +948,7 @@
         </div>
         <div class="box">
           <h2>What ${esc(f.name)}'s instincts learned</h2>
-          <p class="note">The move its instincts favor in each situation. Claude sees this before every move.</p>
+          <p class="note">The skill its instincts favor in each situation. Claude sees this before every action.</p>
           ${brainRows(f)}
         </div>
       </div>
@@ -652,6 +961,7 @@
       const sg = e.target.closest('[data-seg="reps"]');
       if (sg) { S.reps = +sg.dataset.val; renderGym(v); return; }
       if (e.target.id === "train") doTrain();
+      if (e.target.id === "spar") startSpar();
       if (e.target.id === "watch-last" && S.report) { S.lastBattle = { match: S.report.lastMatch, foe: S.report.lastFoe, label: "Last practice round" }; setTab("battle"); }
     };
   }
@@ -660,37 +970,41 @@
     const f = active();
     if (!f) return;
     try {
+      const partner = E.PARTNERS.find((p) => p.id === S.partnerId);
+      if (f.level < partner.unlock) throw new Error(`${partner.name} unlocks at level ${partner.unlock}.`);
+      const paid = ECON.payForGym(S.progress.wallet, S.reps);   // throws if you can't afford it
       const { fighter, report } = E.train(f, S.partnerId, S.reps);
+      S.progress.wallet = paid.wallet; saveProgress();
       report.lastFoe = E.partnerFighter(S.partnerId, f);
       report.fighterId = f.id;
       saveFighter(fighter);                    // never waits on the network
       S.report = report;
+      queueReview(f.id, A.gymSummary(report));
       render();
-      if (report.levelAfter > report.levelBefore) toast(`Level up! ${fighter.name} is now level ${report.levelAfter}.`);
-      coachSoon(f.id, A.gymSummary(report));
+      if (report.levelAfter > report.levelBefore) toast(`Level up! ${fighter.name} is now level ${report.levelAfter}. Spend the stat point in Design.`);
     } catch (err) { toast(err.message); }
   }
   function reportBox(r) {
-    const p = E.PARTNERS.find((x) => x.id === r.partner);
+    const p = E.PARTNERS.find((x) => x.id === r.partner), f = active();
     const parts = [`${r.win} win${r.win === 1 ? "" : "s"}`, r.draw ? `${r.draw} draw${r.draw === 1 ? "" : "s"}` : "", `${r.loss} loss${r.loss === 1 ? "" : "es"}`].filter(Boolean);
-    const rows = r.mastery.map((m) => `<div class="mrow" style="--c:${STYLE_VAR[E.SKILLS[m.move].style]}">
-        <span class="mv">${E.SKILLS[m.move].move}</span>
+    const rows = r.mastery.map((m) => { const sk = E.skillOf(f, m.move) || { name: m.move, style: "aggro" }; return `<div class="mrow" style="--c:${STYLE_VAR[sk.style]}">
+        <span class="mv">${esc(sk.name)}</span>
         <span class="mtrack"><span class="was" style="width:${(m.before / 0.5) * 100}%"></span><span class="now" style="width:${(m.after / 0.5) * 100}%"></span></span>
-        <span class="val">+${Math.round(m.after * 100)}%</span></div>`).join("");
+        <span class="val">+${Math.round(m.after * 100)}%</span></div>`; }).join("");
     return `<div class="box">
       <h2>Session report · vs ${esc(p.name)}</h2>
       <div class="report-head">${parts.join(", ")}</div>
       <div class="row"><span class="badge">+${r.xpGained} XP</span>${r.levelAfter > r.levelBefore ? `<span class="badge">LEVEL ${r.levelBefore} → ${r.levelAfter}</span>` : ""}</div>
-      <div class="field"><span class="lab">Move mastery (bonus damage, max +50%)</span><div class="mastery">${rows}</div></div>
+      <div class="field"><span class="lab">Skill mastery (bonus damage, max +50%)</span><div class="mastery">${rows}</div></div>
       <div class="row"><button class="btn" type="button" id="watch-last">Watch the last round</button></div>
     </div>`;
   }
   function brainRows(f) {
     return `<div class="brain">${E.brainMap(f).map((row) => {
-      const sk = E.SKILLS[row.best], c = STYLE_VAR[sk.style];
+      const sk = E.skillOf(f, row.best), c = STYLE_VAR[sk.style];
       const ctx = row.vs ? `After their ${E.STYLE_INFO[row.vs].label} move` : "First move";
       return `<div class="brow" style="--c:${c}"><span class="ctx">${ctx}</span>
-        <span class="ans"><span class="chip">${sk.move}</span><span class="conf"><span style="width:${Math.round(row.confidence * 100)}%"></span></span>
+        <span class="ans"><span class="chip">${esc(sk.name)}</span><span class="conf"><span style="width:${Math.round(row.confidence * 100)}%"></span></span>
         <span class="pct">${Math.round(row.confidence * 100)}%</span></span></div>`;
     }).join("")}</div>`;
   }
@@ -727,6 +1041,67 @@
     svg.addEventListener("pointerleave", () => (tip.hidden = true));
   }
 
+  // ---------- spar by hand (imitation learning) ----------
+  function startSpar() {
+    const f = active();
+    const partner = E.PARTNERS.find((p) => p.id === S.partnerId);
+    if (f.level < partner.unlock) { toast(`${partner.name} unlocks at level ${partner.unlock}.`); return; }
+    S.spar = { ...E.newSpar(f, S.partnerId), fighterId: f.id, busy: false, done: false };
+    render();
+  }
+  function renderSpar(v) {
+    const sp = S.spar, f = active(), st = sp.state, me = st.side[0];
+    const mask = E.legalMask(st, 0);
+    const btns = me.f.moves.map((m, i) => {
+      const sk = E.skillOf(me.f, m);
+      const why = mask[i] ? `${sk.energy}E` : me.cooldowns[m] > 0 ? "cooldown" : "no energy";
+      return `<button type="button" class="act" data-act="${i}" style="--c:${STYLE_VAR[sk.style]}" ${mask[i] && !sp.busy && !sp.done ? "" : "disabled"}><b>${esc(sk.name)}</b><span>${E.STYLE_INFO[sk.style].label} · ${why}</span></button>`;
+    }).join("") + (me.f.item ? `<button type="button" class="act" data-act="4" ${mask[4] && !sp.busy && !sp.done ? "" : "disabled"}><b>${E.ITEMS[me.f.item].name}</b><span>item · ${mask[4] ? "ready" : "used"}</span></button>` : "");
+    v.innerHTML = `<div class="box"><h2>Spar by hand · vs ${esc(sp.foe.name)}</h2>
+        <p class="note">You choose ${esc(f.name)}'s action each turn. Its instincts copy your choices and learn from how they turn out.</p></div>
+      ${sceneHtml(f, true)}
+      <div class="box"><h2>Your action</h2><div class="acts">${btns || ""}</div>
+        <div class="row"><button class="btn" type="button" id="spar-quit">${sp.done ? "Back to the gym" : "Stop sparring"}</button></div>
+        <div id="battle-result"></div><div data-coach-box>${coachHtml()}</div></div>
+      <div class="box"><h2>Battle log</h2><ol class="log" id="log"></ol></div>`;
+    paintSprites(v);
+    prepareScene(me.f, sp.foe, "Sparring");
+    const last = st.turns.at(-1);
+    setHud(last?.state, [me.max, st.side[1].max]);
+    if (last) { setHp("player", last.hp[0], me.max); setHp("foe", last.hp[1], st.side[1].max); }   // a redraw keeps the HP where it was
+    if (st.turns.length) { for (const t of st.turns) for (const a of [...t.actions].sort((x, y) => x.order - y.order)) logLine(t.turn, a); }
+    $("text").textContent = sp.done ? "Sparring finished." : `Turn ${st.turn}: choose an action.`;
+    v.onclick = async (e) => {
+      const b = e.target.closest("[data-act]");
+      if (b && !b.disabled && !sp.busy && !sp.done) {
+        sp.busy = true;
+        for (const x of v.querySelectorAll("[data-act]")) x.disabled = true;
+        const prev = st.turns.at(-1);
+        const t = E.sparTurn(sp, +b.dataset.act);
+        const anim = { seq: ++battleSeq, kind: "spar", cancelled: false, finished: false };
+        S.battle = anim;
+        try { await playTurn(anim, t, prev ? prev.hp.slice() : [me.max, st.side[1].max], [me.max, st.side[1].max]); } catch (err) { if (!(err instanceof Cancel)) console.error(err); }
+        anim.finished = true;
+        sp.busy = false;
+        if (st.over) finishSparUi(v); else if (S.spar === sp) renderSpar(v);
+        return;
+      }
+      if (e.target.id === "spar-quit") { S.spar = null; render(); }
+    };
+  }
+  function finishSparUi(v) {
+    const sp = S.spar, latest = find(sp.fighterId);
+    if (!latest) { S.spar = null; render(); return; }
+    const out = E.finishSpar(latest, sp);
+    saveFighter(out.fighter);
+    sp.done = true;
+    queueReview(latest.id, `Hands-on sparring (the trainer chose every action) against ${sp.foe.name}: ${out.match.result}.`);
+    renderSpar(v);
+    $("battle-result").innerHTML = `<p class="outcome">${out.match.result === "win" ? "Victory" : out.match.result === "loss" ? "Defeat" : "Draw"}</p>
+      <p class="small" style="margin:0">+${out.xp} XP. ${esc(latest.name)}'s instincts learned from your choices.</p>`;
+    renderActiveBar();
+  }
+
   // ---------- battle tab ----------
   function rivalState(i) {
     const rv = E.RIVALS[i];
@@ -738,20 +1113,29 @@
     const f = active();
     if (!f) return needFighter(v, "battle");
     if (!S.rivalId) S.rivalId = (E.RIVALS.find((r, i) => rivalState(i) === "next") || E.RIVALS[0]).id;
-    const rv = E.RIVALS.find((r) => r.id === S.rivalId);
     const pending = S.pendingChallenge;
     v.innerHTML = `
       ${pending ? "" : `<div class="box" id="ladder">${ladderHtml()}</div>`}
       <div class="box">
         <div class="airow"><button class="switch" type="button" role="switch" id="ai-switch" aria-checked="${aiUsable()}" aria-label="Claude plays every move"
-          ${S.ai.sample && !S.ai.off ? "" : "disabled"}></button><b class="small">Claude plays every move</b></div>
+          ${S.ai.sample && !S.ai.off ? "" : "disabled"}></button><b class="small">Claude plays every action</b></div>
         <p class="note" id="ai-status" style="margin:0">${esc(aiStatusText())}</p>
+        <div class="airow"><button class="switch" type="button" role="switch" id="oc-switch" aria-checked="${S.overclock}" aria-label="Overclock"></button>
+          <span class="small"><b>Overclock</b> · ${ECON.PRICES.overclock} Cycles: your fighter thinks with Claude's bigger model for the next battle. Smarter, but each turn takes longer.</span></div>
+        <div class="row"><button class="btn" type="button" id="scout">Scouting report · ${ECON.PRICES.scout} Cycles</button></div>
+        <div id="scout-out">${scoutHtml()}</div>
       </div>
       ${sceneHtml(f)}
       <div id="battle-result"></div>
       <div class="box"><h2>Battle log</h2><ol class="log" id="log"></ol></div>`;
-    void rv;
     renderBattleBody(v, pending);
+  }
+  function foeKey() { return S.pendingChallenge ? `a:${S.pendingChallenge.owner}|${S.pendingChallenge.id}` : `r:${S.rivalId}`; }
+  function scoutHtml() {
+    const s = S.scouting[foeKey()];
+    if (!s) return "";
+    if (s.busy) return `<p class="small dots">Scouting</p>`;
+    return `<div class="coach"><span class="lab">Scouting report (used in your next battle against this opponent)</span><pre>${esc(s.plan)}</pre></div>`;
   }
   function ladderHtml() {
     const rivals = E.RIVALS.map((rv, i) => {
@@ -760,17 +1144,13 @@
         <canvas data-sprite="r:${rv.id}" width="28" height="28" aria-hidden="true"></canvas>
         <span class="name">${esc(rv.name)} <span class="lv">LV ${rv.level}</span></span>
         <span class="tag ${st}">${st === "won" ? "BEATEN" : st === "next" ? "NEXT UP" : "LOCKED"}</span>
-        <span class="blurb">${st === "locked" ? `Beat ${esc(E.RIVALS[i - 1].name)} to unlock.` : esc(rv.persona)}</span></button>`;
+        <span class="blurb">${st === "locked" ? `Beat ${esc(E.RIVALS[i - 1].name)} to unlock.` : `${esc(rv.persona)} Reward: ${ECON.rivalReward(rv.level, st !== "won")} Cycles.`}</span></button>`;
     }).join("");
     const rv = E.RIVALS.find((r) => r.id === S.rivalId) || E.RIVALS[0];
-    return `<h2>Rival ladder</h2>
-        <div class="rivals">${rivals}</div>
-        <div class="row"><button class="btn primary" type="button" id="fight" ${battleRunning() ? "disabled" : ""}>Fight ${esc(rv.name)}</button></div>`;
+    return `<h2>Rival ladder</h2><div class="rivals">${rivals}</div>
+      <div class="row"><button class="btn primary" type="button" id="fight" ${battleRunning() ? "disabled" : ""}>Fight ${esc(rv.name)}</button></div>`;
   }
-  function refreshLadder() {
-    const l = $("ladder");
-    if (l) { l.innerHTML = ladderHtml(); paintSprites(l); }
-  }
+  function refreshLadder() { const l = $("ladder"); if (l) { l.innerHTML = ladderHtml(); paintSprites(l); } }
   function renderBattleBody(v, pending) {
     const f = active();
     paintSprites(v);
@@ -784,11 +1164,12 @@
         S.rivalId = r.dataset.rival;
         for (const c of v.querySelectorAll("[data-rival]")) c.setAttribute("aria-pressed", String(c === r));
         $("fight").textContent = `Fight ${E.RIVALS.find((x) => x.id === S.rivalId).name}`;
+        $("scout-out").innerHTML = scoutHtml();
         return;
       }
-      if (e.target.id === "ai-switch") {
-        S.aiOn = !S.aiOn; e.target.setAttribute("aria-checked", String(aiUsable())); $("ai-status").textContent = aiStatusText(); return;
-      }
+      if (e.target.id === "ai-switch") { S.aiOn = !S.aiOn; refreshAiUi(); return; }
+      if (e.target.id === "oc-switch") { S.overclock = !S.overclock; e.target.setAttribute("aria-checked", String(S.overclock)); return; }
+      if (e.target.id === "scout") { doScout(); return; }
       if (e.target.id === "fight") { if (!battleRunning()) startBattle("rival", { id: S.rivalId }); return; }
       if (e.target.id === "b-stop") { if (battleRunning()) { stopBattle(); $("text").textContent = "Battle stopped. No XP was given."; setControls(false); } return; }
       if (e.target.id === "b-play") { togglePause(e.target); return; }
@@ -798,28 +1179,49 @@
     if (pending) { S.pendingChallenge = null; startBattle("arena", pending); }
     else if (S.lastBattle) { const lb = S.lastBattle; S.lastBattle = null; playReplay(lb); }
   }
-  function sceneHtml(f) {
+  function currentFoe(kind, target) {
+    if (kind === "rival") return E.rivalFighter(target.id);
+    const foe = (S.arena.docs[target.owner] || []).find((p) => p.id === target.id);
+    return foe ? E.clone(foe) : null;
+  }
+  async function doScout() {
+    const me = active();
+    if (!aiUsable()) { toast("Scouting needs Claude, which isn't available right now."); return; }
+    const key = foeKey(), kind = key.startsWith("a:") ? "arena" : "rival";
+    const target = kind === "rival" ? { id: S.rivalId } : S.pendingChallenge;
+    const foe = currentFoe(kind, target);
+    if (!foe || (S.scouting[key] && S.scouting[key].busy)) return;
+    if (!pay(ECON.PRICES.scout, `Scouting ${foe.name}`)) return;
+    S.scouting[key] = { busy: true };
+    const out = $("scout-out"); if (out) out.innerHTML = scoutHtml();
+    try { S.scouting[key] = { plan: await A.scout(S.ai.sample, me, foe) }; }
+    catch (e) { noteAiError(e && e.code); delete S.scouting[key]; earn(ECON.PRICES.scout, "Refund: scouting failed"); toast("Scouting didn't work this time. You weren't charged."); }
+    const o2 = $("scout-out"); if (o2) o2.innerHTML = scoutHtml();
+  }
+  function sceneHtml(f, spar) {
     return `<div class="console">
       <div class="scene" id="scene">
         <div class="pad foe"></div><div class="pad player"></div>
         <canvas class="mon foe" id="mon-foe" width="28" height="28" role="img" aria-label="Opponent"></canvas>
         <canvas class="mon player" id="mon-player" width="28" height="28" role="img" aria-label="${esc(f.name)}"></canvas>
         <div class="hud foe"><div class="hud-row"><span class="hud-name" id="name-foe">???</span><span class="hud-lv" id="lv-foe"></span></div>
-          <div class="hp"><span class="hp-label">HP</span><span class="hp-track"><span class="hp-fill" id="hp-foe"></span></span></div></div>
+          <div class="hp"><span class="hp-label">HP</span><span class="hp-track"><span class="hp-fill" id="hp-foe"></span></span></div>
+          <div class="hud-sub"><span class="energy" id="en-foe"></span><span class="statuses" id="st-foe"></span></div></div>
         <div class="hud player"><div class="hud-row"><span class="hud-name" id="name-player">${esc(f.name)}</span><span class="hud-lv" id="lv-player">LV ${f.level}</span></div>
           <div class="hp"><span class="hp-label">HP</span><span class="hp-track"><span class="hp-fill" id="hp-player"></span></span></div>
+          <div class="hud-sub"><span class="energy" id="en-player"></span><span class="statuses" id="st-player"></span></div>
           <div class="hp-num" id="hpnum-player"></div></div>
         <div class="banner" id="banner"></div>
         <canvas class="fx" id="fx"></canvas>
       </div>
-      <div class="textbox"><p id="text">Pick a rival and press Fight.</p></div>
+      <div class="textbox"><p id="text">${spar ? "" : "Pick a rival and press Fight."}</p></div>
       <div class="sr-only" aria-live="polite" id="announce"></div>
-      <div class="controls">
+      ${spar ? "" : `<div class="controls">
         <button class="btn primary" type="button" id="b-play" disabled>Pause</button>
         <button class="btn" type="button" id="b-speed">${B.speed}×</button>
         <button class="btn" type="button" id="b-stop" disabled>Stop</button>
         <span class="readout" id="readout">Ready</span>
-      </div>
+      </div>`}
     </div>`;
   }
 
@@ -828,12 +1230,7 @@
     const f = active();
     const uid = S.me.id;
     const rows = [];
-    for (const [owner, list] of Object.entries(S.arena.docs)) {
-      for (const p of list) {
-        const r = S.arena.ratings[`${owner}/${p.id}`] || { rating: 1000, w: 0, l: 0, d: 0 };
-        rows.push({ owner, p, ...r });
-      }
-    }
+    for (const [owner, list] of Object.entries(S.arena.docs)) for (const p of list) rows.push({ owner, p, ...(S.arena.ratings[`${owner}/${p.id}`] || { rating: 1000, w: 0, l: 0, d: 0 }) });
     rows.sort((a, b) => b.rating - a.rating || b.w - a.w || a.p.name.localeCompare(b.p.name));
     const mine = f ? myArenaList().find((p) => p.id === f.id) : null;
     let pubBox = "";
@@ -842,9 +1239,10 @@
     else if (S.me.canWrite === false) pubBox = `<p class="note">You have view-only access, so you can challenge fighters but not publish or record results. Ask the owner for Contributor access.</p>`;
     else if (!f) pubBox = `<p class="note">Create a fighter to publish it.</p>`;
     else {
-      const outdated = mine && (mine.level !== f.level || mine.playbook !== f.playbook || mine.persona !== f.persona || mine.moves.join() !== f.moves.join());
-      pubBox = `<p class="small" style="margin:0">${mine ? (outdated ? `${esc(f.name)} is in the arena, but at an older version (level ${mine.level}). Update it to share its latest training.` : `${esc(f.name)} is in the arena with its latest training.`)
-        : `Publish ${esc(f.name)} so other players can challenge it. Its design, persona, playbook and instincts are shared.`}</p>
+      const outdated = mine && (mine.level !== f.level || mine.playbook !== f.playbook || mine.persona !== f.persona || mine.moves.join() !== f.moves.join()
+        || JSON.stringify(mine.rules || []) !== JSON.stringify(f.rules || []) || (mine.passive?.id || null) !== (f.passive?.id || null) || (mine.item || null) !== (f.item || null));
+      pubBox = `<p class="small" style="margin:0">${mine ? (outdated ? `${esc(f.name)} is in the arena at an older version (level ${mine.level}). Update it to share its latest training and loadout.` : `${esc(f.name)} is in the arena with its latest training.`)
+        : `Publish ${esc(f.name)} so other players can challenge it. Its design, skills, rules, persona, playbook and instincts are shared.`}</p>
         <div class="row">${mine ? `${outdated ? `<button class="btn primary" type="button" id="publish">Update in arena</button>` : ""}<button class="btn" type="button" id="unpublish">Remove from arena</button>`
           : `<button class="btn primary" type="button" id="publish">Publish ${esc(f.name)}</button>`}</div>`;
     }
@@ -861,11 +1259,11 @@
       : `<p class="note">${S.arena.loaded ? "No fighters in the arena yet. Publish yours, then share this game with friends so they can publish theirs." : S.arena.db ? "Loading the arena…" : ""}</p>`;
     v.innerHTML = `<div class="box">
         <h2>Arena</h2>
-        <p class="small" style="margin:0">Fighters published by everyone who plays this game. When you challenge one, Claude plays both sides, each with its own persona, playbook and instincts. The requests come from your Claude account.</p>
+        <p class="small" style="margin:0">Fighters published by everyone who plays this game. When you challenge one, Claude plays both sides, each with its own persona, playbook, rules and instincts. The requests come from your Claude account. Wins pay ${ECON.arenaReward(ECON.newWallet(), "win", false)} Cycles (up to ${ECON.ARENA_REWARDS_PER_DAY} rewards a day; beating your own fighters pays nothing).</p>
         ${pubBox}
       </div>
       <div class="box"><h2>Leaderboard</h2>${table}
-        <p class="note">To bring friends in, share this game with them as Contributors (Share menu). Results are worked out in the challenger's browser and fighters' stats are reported by their owners, so this is a friendly league, not a tamper-proof one.</p>
+        <p class="note">To bring friends in, share this game with them as Contributors (Share menu). Results are worked out in the challenger's browser and every published fighter is re-checked by the game, but it's still a friendly league, not a tamper-proof one.</p>
       </div>`;
     paintSprites(v);
     fillOwnerNames(v);
@@ -873,11 +1271,7 @@
       if (e.target.id === "publish" && f) { publish(f); render(); return; }
       if (e.target.id === "unpublish" && f) { unpublish(f.id); toast(`${f.name} left the arena.`); render(); return; }
       const ch = e.target.closest("[data-challenge]");
-      if (ch && f) {
-        const [owner, id] = ch.dataset.challenge.split("|");
-        S.pendingChallenge = { owner, id };
-        setTab("battle");
-      }
+      if (ch && f) { const [owner, id] = ch.dataset.challenge.split("|"); S.pendingChallenge = { owner, id }; setTab("battle"); }
     };
   }
 
@@ -896,14 +1290,8 @@
     if (stop) stop.disabled = !running;
     if (fight) fight.disabled = running;
   }
-  function togglePause(btn) {
-    B.paused = !B.paused; btn.textContent = B.paused ? "Play" : "Pause";
-    if (!B.paused) B.waiters.splice(0).forEach((fn) => fn());
-  }
-  function cycleSpeed(btn) {
-    B.speed = B.speed === 1 ? 2 : B.speed === 2 ? 4 : 1;
-    document.documentElement.style.setProperty("--spd", B.speed); btn.textContent = B.speed + "×";
-  }
+  function togglePause(btn) { B.paused = !B.paused; btn.textContent = B.paused ? "Play" : "Pause"; if (!B.paused) B.waiters.splice(0).forEach((fn) => fn()); }
+  function cycleSpeed(btn) { B.speed = B.speed === 1 ? 2 : B.speed === 2 ? 4 : 1; document.documentElement.style.setProperty("--spd", B.speed); btn.textContent = B.speed + "×"; }
   async function gate(b) {
     while (B.paused && !b.cancelled) await new Promise((res) => B.waiters.push(res));
     if (b.cancelled || S.battle !== b) throw new Cancel();
@@ -915,7 +1303,7 @@
     const el = $("text"); if (!el) throw new Cancel();
     $("announce").textContent = text;
     if (reduce) el.textContent = text;
-    else for (let i = 1; i <= text.length; i++) { el.textContent = text.slice(0, i); await sleep(b, 16); }
+    else for (let i = 1; i <= text.length; i++) { el.textContent = text.slice(0, i); await sleep(b, 14); }
     await sleep(b, hold);
   }
   async function quote(b, name, line, hold = 900) {
@@ -930,13 +1318,25 @@
     fill.classList.toggle("mid", pct <= 50 && pct > 20); fill.classList.toggle("low", pct <= 20);
     if (side === "player") $("hpnum-player").textContent = `${Math.ceil(hp)} / ${max}`;
   }
+  /** Energy pips and status chips under each HP bar, from a turn's state snapshot. */
+  function setHud(state, maxes) {
+    const sides = ["player", "foe"];
+    sides.forEach((side, i) => {
+      const s = state ? state[i] : { energy: E.ENERGY.start, status: [], shield: 0 };
+      const en = $("en-" + side), st = $("st-" + side);
+      if (en) en.innerHTML = Array.from({ length: E.ENERGY.max }, (_, k) => `<i class="${k < s.energy ? "on" : ""}"></i>`).join("") + `<span class="sr-only">${s.energy} energy</span>`;
+      if (st) st.innerHTML = [...(s.shield ? [`shield ${Math.round(s.shield)}`] : []), ...s.status].map((x) => `<span class="st st-${esc(String(x).split(/[×\s]/)[0])}">${esc(x)}</span>`).join("");
+    });
+  }
   function logLine(turn, a) {
-    const sk = E.SKILLS[a.skill];
     const li = document.createElement("li");
     const eff = a.effect === "super" ? " · super effective" : a.effect === "resisted" ? " · resisted" : "";
-    li.innerHTML = `<span class="t">T${String(turn).padStart(2, "0")}</span><span class="chip" style="--c:${STYLE_VAR[sk.style]}">${sk.move}</span>
-      <span class="who">${esc(a.agent_name)} <span class="src ${a.source === "ai" ? "ai" : ""}">${a.source === "ai" ? "AI" : "INSTINCT"}</span></span>
-      <span class="pts">−${a.points.toFixed(1)} HP${eff}</span>${a.line ? `<span class="said">“${esc(a.line)}”</span>` : ""}`;
+    const src = a.source === "ai" ? ["ai", "AI"] : a.source === "rule" ? ["rule", "RULE"] : a.source === "you" ? ["you", "YOU"] : ["", "INSTINCT"];
+    const what = a.stunned ? "stunned" : a.fizzled ? "no energy" : a.kind === "item" ? `item${a.healed ? ` +${a.healed} HP` : ""}` : a.kind === "rest" ? "rest" : `−${(a.points || 0).toFixed(1)} HP${eff}`;
+    const extra = [a.applied.length ? a.applied.join(", ") : "", a.healed && a.kind === "skill" ? `+${a.healed} HP` : "", a.absorbed ? `${a.absorbed} blocked` : "", a.reflected ? `${a.reflected} reflected` : ""].filter(Boolean).join(" · ");
+    li.innerHTML = `<span class="t">T${String(turn).padStart(2, "0")}</span><span class="chip" style="--c:${a.style ? STYLE_VAR[a.style] : "var(--muted)"}">${esc(a.name)}</span>
+      <span class="who">${esc(a.agent_name)} <span class="src ${src[0]}">${src[1]}</span></span>
+      <span class="pts">${what}${extra ? " · " + esc(extra) : ""}</span>${a.line ? `<span class="said">“${esc(a.line)}”</span>` : ""}${a.rule ? `<span class="said">${esc(a.rule)}</span>` : ""}`;
     const ol = $("log"); if (!ol) return;
     const atEnd = ol.scrollHeight - ol.scrollTop - ol.clientHeight < 40;
     ol.append(li); if (atEnd) ol.scrollTop = ol.scrollHeight;
@@ -997,42 +1397,104 @@
   requestAnimationFrame(tick);
 
   function prepareScene(me, foe, label) {
-    $("log").innerHTML = ""; $("battle-result").innerHTML = "";
+    if ($("log") && !S.spar) $("log").innerHTML = "";
+    if ($("battle-result") && !S.spar) $("battle-result").innerHTML = "";
     $("banner").className = "banner"; $("banner").textContent = "";
     for (const side of ["player", "foe"]) $("mon-" + side).className = "mon " + side;
     $("name-foe").textContent = foe.name; $("lv-foe").textContent = "LV " + (foe.level || 1);
     $("name-player").textContent = me.name; $("lv-player").textContent = "LV " + me.level;
     SP.draw($("mon-foe"), foe, {}); SP.draw($("mon-player"), me, { back: true });
     $("mon-foe").setAttribute("aria-label", foe.name);
-    setHp("player", E.maxHp(me.level), E.maxHp(me.level)); setHp("foe", E.maxHp(foe.level || 1), E.maxHp(foe.level || 1));
-    $("readout").textContent = label;
+    const mMax = E.maxHp(me.level, E.statsOf(me).vitality), fMax = E.maxHp(foe.level || 1, E.statsOf(foe).vitality);
+    setHp("player", mMax, mMax); setHp("foe", fMax, fMax);
+    setHud(null);
+    setupFx();
+    if ($("readout")) $("readout").textContent = label;
+  }
+  const STATUS_TEXT = { burn: "was burned", poison: "was poisoned", stun: "is stunned", weaken: "was weakened", shield: "raised a shield", regen: "started regenerating", focus: "is focusing", cleanse: "shook off its ailments" };
+  /** Animate one resolved turn (shared by battles, replays and sparring). `cur` is HP at the start of the turn. */
+  async function playTurn(b, t, cur, maxes) {
+    const names = t.actions.map((a) => a.agent_name);
+    const sides = ["player", "foe"];
+    const ordered = [0, 1].sort((x, y) => (t.actions[x].order || x + 1) - (t.actions[y].order || y + 1));
+    for (const i of ordered) {
+      const a = t.actions[i], att = sides[i], def = sides[1 - i], target = 1 - i;
+      if (a.skipped) continue;
+      if (a.stunned) { await say(b, `${a.agent_name} is stunned and can't move!`, 450); logLine(t.turn, a); continue; }
+      if (a.line) await quote(b, a.agent_name, a.line, 950);
+      if (a.kind === "item") {
+        await say(b, `${a.agent_name} uses ${a.name}!`, 300);
+        spawn("sparkle", center($("mon-" + att)), center($("mon-" + att)), "#9fe0a8");
+        if (a.healed) { cur[i] = Math.min(maxes[i], cur[i] + a.healed); setHp(att, cur[i], maxes[i]); await say(b, `${a.agent_name} recovered ${Math.round(a.healed)} HP.`, 350); }
+        logLine(t.turn, a); continue;
+      }
+      if (a.kind === "rest") { await say(b, `${a.agent_name} rests to recover energy.`, 350); logLine(t.turn, a); continue; }
+      if (a.fizzled) { await say(b, `${a.agent_name} doesn't have the energy for ${a.name}!`, 450); logLine(t.turn, a); continue; }
+      const sk = a.kind === "skill" ? E.skillOf({ custom: {} }, a.skill) || { fx: "burst", color: "#c8402a" } : { fx: "burst" };
+      await say(b, `${a.agent_name} used ${a.name}!`, 200);
+      logLine(t.turn, a);
+      const At = $("mon-" + att), D = $("mon-" + def);
+      const fx = sk.fx || (a.applied.includes("shield") ? "barrier" : a.applied.includes("regen") ? "sparkle" : a.style === "mind" ? "glyphs" : a.style === "social" ? "bubbles" : a.style === "guard" ? "scan" : "burst");
+      if (fx === "burst" && !reduce) retrigger(At, "lunge-" + att, 420);
+      if (fx === "ghost") retrigger(At, "blink", 520);
+      if (fx === "barrier" || fx === "sparkle") retrigger(At, "rise", 500);
+      spawn(fx, center(At), center(D), a.style ? E.STYLE_COLOR[a.style] : "#c8402a");
+      await sleep(b, fx === "scan" ? 800 : 500);
+      if (a.points > 0) {
+        retrigger(D, "hit", 480);
+        if (!reduce && a.effect === "super") retrigger($("scene"), "shake", 380);
+        cur[target] = Math.max(0, cur[target] - a.points);
+        setHp(def, cur[target], maxes[target]);
+      }
+      if (a.absorbed) await say(b, `The shield blocked ${Math.round(a.absorbed)} damage.`, 300);
+      if (a.healed) { cur[i] = Math.min(maxes[i], cur[i] + a.healed); setHp(att, cur[i], maxes[i]); }
+      if (a.reflected) { cur[i] = Math.max(0, cur[i] - a.reflected); setHp(att, cur[i], maxes[i]); }
+      await sleep(b, 240);
+      if (a.effect === "super" && a.points > 0) await say(b, "It's super effective!", 380);
+      else if (a.effect === "resisted" && a.points > 0) await say(b, "It's not very effective…", 340);
+      for (const st of a.applied) {
+        const selfish = ["shield", "regen", "focus", "cleanse"].includes(st);
+        await say(b, `${selfish ? a.agent_name : names[target]} ${STATUS_TEXT[st] || st}!`, 300);
+      }
+    }
+    for (const ev of t.events || []) {
+      const idx = names[0] === ev.who ? 0 : 1;
+      if (ev.kind === "regen") { cur[idx] = Math.min(maxes[idx], cur[idx] + ev.amount); await say(b, `${ev.who} regenerates ${Math.round(ev.amount)} HP.`, 300); }
+      else { cur[idx] = Math.max(0, cur[idx] - ev.amount); retrigger($("mon-" + sides[idx]), "hit", 480); await say(b, `${ev.who} takes ${ev.amount} ${ev.kind} damage.`, 300); }
+      setHp(sides[idx], cur[idx], maxes[idx]);
+    }
+    cur[0] = t.hp[0]; cur[1] = t.hp[1];
+    setHp("player", cur[0], maxes[0]); setHp("foe", cur[1], maxes[1]);
+    if (t.state) setHud(t.state, maxes);
   }
 
-  /** Start a real battle: Claude (or instincts) choose, turns animate as they arrive. */
+  /** Start a real battle: Claude (or rules, or instincts) choose, turns animate as they arrive. */
   function startBattle(kind, target) {
-    const me = active();
-    if (!me || !$("scene")) return;
+    const meRaw = active();
+    if (!meRaw || !$("scene")) return;
     stopBattle();
-    let foe, label;
-    if (kind === "rival") { foe = E.rivalFighter(target.id); label = "Rival battle"; }
-    else {
-      foe = (S.arena.docs[target.owner] || []).find((p) => p.id === target.id);
-      if (!foe) { toast("That fighter has left the arena."); return; }
-      foe = E.clone(foe); label = "Arena challenge";
-    }
+    const foe = currentFoe(kind, target);
+    if (!foe) { toast("That fighter has left the arena."); return; }
+    const me = E.clone(meRaw);
+    if (me.item && !(S.progress.inventory[me.item] > 0)) me.item = null;   // you only bring items you own
     const useAi = aiUsable();
-    const b = { seq: ++battleSeq, kind, target, me: E.clone(me), foe, useAi, queue: [], done: false, finished: false, cancelled: false,
+    const overclock = !!(S.overclock && useAi);
+    if (overclock && !pay(ECON.PRICES.overclock, `Overclock for ${me.name} vs ${foe.name}`)) return;
+    const sKey = kind === "rival" ? `r:${target.id}` : `a:${target.owner}|${target.id}`;
+    const scouting = S.scouting[sKey] && S.scouting[sKey].plan ? S.scouting[sKey].plan : null;
+    const label = kind === "rival" ? "Rival battle" : "Arena challenge";
+    const b = { seq: ++battleSeq, kind, target, me, foe, useAi, overclock, queue: [], done: false, finished: false, cancelled: false,
                 out: null, error: null, ctl: new AbortController(), wake: null, paceWake: null, label };
     S.battle = b;
-    prepareScene(b.me, foe, label);
+    prepareScene(me, foe, label);
     setControls(true);
     $("scene").closest(".console").scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
     const nextEvent = () => new Promise((res) => { b.wake = res; });
     const signalEvent = () => { const w = b.wake; b.wake = null; if (w) w(); };
     A.runAiBattle({
-      a: b.me, b: foe, sample: useAi ? S.ai.sample : null, signal: b.ctl.signal, learnA: true,
+      a: me, b: foe, sample: useAi ? S.ai.sample : null, signal: b.ctl.signal, learnA: true,
+      tiers: [overclock ? "overclock" : "quick", "quick"], scouting: [scouting, null],
       onTurn: (t) => { b.queue.push(t); signalEvent(); },
-      // stay at most one turn ahead of the animation, so Stop wastes little
       pace: () => (b.queue.length < 1 ? Promise.resolve() : new Promise((res) => { b.paceWake = res; })),
     }).then((out) => { b.out = out; b.done = true; signalEvent(); },
       (err) => { if (!(err instanceof A.Cancelled)) { b.error = err; b.done = true; console.error(err); } signalEvent(); });
@@ -1040,10 +1502,10 @@
   }
   async function animateBattle(b, nextEvent) {
     const me = b.me, foe = b.foe;
-    const meMax = E.maxHp(me.level), foeMax = E.maxHp(foe.level || 1);
-    await say(b, `${foe.name} wants to battle!`, 450);
-    await say(b, `Go, ${me.name}!`, 350);
-    const cur = [meMax, foeMax];
+    const maxes = [E.maxHp(me.level, E.statsOf(me).vitality), E.maxHp(foe.level || 1, E.statsOf(foe).vitality)];
+    await say(b, `${foe.name} wants to battle!`, 400);
+    await say(b, `Go, ${me.name}!`, 300);
+    const cur = maxes.slice();
     let phase = null;
     for (;;) {
       await gate(b);
@@ -1053,44 +1515,20 @@
         if (t.phase !== phase) {
           phase = t.phase;
           $("banner").textContent = phase.toUpperCase() + (t.multiplier > 1 ? `  ×${t.multiplier}` : "");
-          retrigger($("banner"), "show", 1500); await sleep(b, 1250);
+          retrigger($("banner"), "show", 1500); await sleep(b, 1200);
         }
-        $("readout").textContent = `Turn ${t.turn} / ${E.TURNS} · ${phase.toUpperCase()}`;
-        for (let i = 0; i < 2; i++) {
-          const a = t.actions[i], att = i === 0 ? "player" : "foe", def = i === 0 ? "foe" : "player";
-          const sk = E.SKILLS[a.skill];
-          if (a.line) await quote(b, a.agent_name, a.line, 1000);
-          await say(b, `${a.agent_name} used ${sk.move}!`, 200);
-          logLine(t.turn, a);
-          const At = $("mon-" + att), D = $("mon-" + def);
-          if (sk.fx === "burst" && !reduce) retrigger(At, "lunge-" + att, 420);
-          if (sk.fx === "ghost") retrigger(At, "blink", 520);
-          if (sk.fx === "barrier" || sk.fx === "sparkle") retrigger(At, "rise", 500);
-          spawn(sk.fx, center(At), center(D), sk.color);
-          await sleep(b, sk.fx === "scan" ? 850 : 520);
-          retrigger(D, "hit", 480);
-          if (!reduce && a.effect === "super") retrigger($("scene"), "shake", 380);
-          const target = 1 - i;
-          cur[target] = Math.max(0, cur[target] - a.points);
-          setHp(def, cur[target], target === 0 ? meMax : foeMax);
-          await sleep(b, 280);
-          if (a.effect === "super") await say(b, "It's super effective!", 420);
-          else if (a.effect === "resisted") await say(b, "It's not very effective…", 380);
-        }
-        cur[0] = t.hp[0]; cur[1] = t.hp[1];
-        setHp("player", cur[0], meMax); setHp("foe", cur[1], foeMax);
+        if ($("readout")) $("readout").textContent = `Turn ${t.turn} / ${E.TURNS} · ${phase.toUpperCase()}`;
+        await playTurn(b, t, cur, maxes);
         continue;
       }
       if (b.done) break;
-      // waiting on Claude for the next turn
       if (b.useAi) textbox(`<span class="dots">${esc(me.name)} and ${esc(foe.name)} are thinking</span>`);
       await nextEvent();
     }
     await gate(b);
     if (b.error) { textbox("Something went wrong in this battle. Try again."); finishUi(b); return; }
-    const m = b.out.match;
-    const w = m.winner;
-    $("readout").textContent = `Final · ${m.turns.length} turns`;
+    const m = b.out.match, w = m.winner;
+    if ($("readout")) $("readout").textContent = `Final · ${m.turns.length} turns`;
     if (w === null) { $("banner").textContent = "DRAW"; $("banner").classList.add("stay"); await say(b, "It's a draw!", 300); }
     else {
       const loserSide = w === 0 ? "foe" : "player", winner = m.agents[w], loser = m.agents[1 - w];
@@ -1103,47 +1541,60 @@
     else applyResult(b);
     finishUi(b);
   }
-  function finishUi(b) {
-    b.finished = true;
-    setControls(false);
-    const pc = S.coach.pending;
-    if (pc) { S.coach.pending = null; coachAfter(pc.id, pc.summary); }
-  }
+  function finishUi(b) { b.finished = true; setControls(false); }
   function applyResult(b) {
     const out = b.out, m = out.match;
     const latest = find(b.me.id);
-    let lines = [];
-    if (out.stoppedReason) { noteAiError(out.stoppedReason); lines.push(A.REASON_TEXT[out.stoppedReason] || A.REASON_TEXT.unavailable); }
+    const lines = [];
+    if (out.stoppedReason) {
+      noteAiError(out.stoppedReason);
+      lines.push(A.REASON_TEXT[out.stoppedReason] || A.REASON_TEXT.unavailable);
+      if (b.overclock && out.stats.ai === 0) { earn(ECON.PRICES.overclock, "Refund: Overclock wasn't used"); lines.push("Overclock refunded."); }
+    }
     if (latest) {
       const award = E.awardBattle(latest, m, 0);
       const f = award.fighter;
       f.brain = E.compactBrain(out.fighterA.brain);          // instincts also learn from real battles
       f.uses = { ...f.uses, ...out.fighterA.uses };
       saveFighter(f);
-      lines.unshift(`+${award.xp} XP${award.levelAfter > award.levelBefore ? ` · Level ${award.levelBefore} → ${award.levelAfter}` : ""}`);
-      if (b.kind === "rival" && award.result === "win" && !S.progress.beaten.includes(b.target.id)) {
-        S.progress.beaten = [...S.progress.beaten, b.target.id];
-        saveProgress();
-        const i = E.RIVALS.findIndex((r) => r.id === b.target.id);
-        const next = E.RIVALS[i + 1];
-        lines.push(next ? `${E.RIVALS[i].name} beaten. ${next.name} is unlocked.` : "You beat the champion. The ladder is yours.");
-        if (next) S.rivalId = next.id;
-        refreshLadder();
+      lines.unshift(`+${award.xp} XP${award.levelAfter > award.levelBefore ? ` · Level ${award.levelBefore} → ${award.levelAfter} (spend the stat point in Design)` : ""}`);
+      // items used in real battles are used up
+      const usedItem = m.turns.some((t) => t.actions[0].kind === "item");
+      if (usedItem && b.me.item) { S.progress.inventory[b.me.item] = Math.max(0, (S.progress.inventory[b.me.item] || 0) - 1); saveProgress(); lines.push(`${E.ITEMS[b.me.item].name} used up (${S.progress.inventory[b.me.item]} left).`); }
+      if (b.kind === "rival") {
+        const rv = E.RIVALS.find((r) => r.id === b.target.id);
+        if (award.result === "win") {
+          const first = !S.progress.beaten.includes(rv.id);
+          const reward = ECON.rivalReward(rv.level, first);
+          if (first) S.progress.beaten = [...S.progress.beaten, rv.id];
+          earn(reward, `${first ? "First win" : "Win"} vs ${rv.name}`, rv.id);
+          lines.push(`+${reward} Cycles.`);
+          const i = E.RIVALS.findIndex((r) => r.id === rv.id), next = E.RIVALS[i + 1];
+          if (first) lines.push(next ? `${rv.name} beaten. ${next.name} is unlocked.` : "You beat the champion. The ladder is yours.");
+          if (first && next) S.rivalId = next.id;
+          refreshLadder();
+        }
       }
-      if (b.kind === "arena") lines.push(recordResult(b, m) ? "Result recorded on the arena leaderboard." : "This result isn't recorded (you need Contributor access and a sign-in).");
-      coachAfter(f.id, A.battleSummary(m, 0));
+      if (b.kind === "arena") {
+        lines.push(recordResult(b, m) ? "Result recorded on the arena leaderboard." : "This result isn't recorded (you need Contributor access and a sign-in).");
+        const own = b.target.owner === S.me.id;
+        const paid = ECON.payArena(S.progress.wallet, award.result, own, `${b.target.owner}/${b.target.id}`);
+        if (paid.amount) { S.progress.wallet = paid.wallet; saveProgress(); lines.push(`+${paid.amount} Cycles.`); }
+        else if (own) lines.push("No Cycles for beating your own fighter.");
+        else if (!paid.amount) lines.push("Today's arena rewards are used up; more tomorrow.");
+      }
+      queueReview(f.id, A.battleSummary(m, 0, f));
     }
     const res = m.winner === null ? "Draw" : m.winner === 0 ? "Victory" : "Defeat";
     const s = out.stats;
     $("battle-result").innerHTML = `<div class="box">
       <div class="outcome">${res} vs ${esc(b.foe.name)}</div>
       ${lines.map((l) => `<p class="small" style="margin:0">${esc(l)}</p>`).join("")}
-      <p class="note" style="margin:0">${s.ai} moves by Claude, ${s.instinct} by instinct.</p>
+      <p class="note" style="margin:0">${s.ai} actions by Claude${b.overclock ? " (overclocked)" : ""}, ${s.rule || 0} by battle rules, ${s.instinct} by instinct.</p>
       <div class="row"><button class="btn primary" type="button" id="again">Rematch</button></div>
-      <div id="coach-box">${coachHtml()}</div>
+      <div data-coach-box>${coachHtml()}</div>
     </div>`;
-    renderActiveBar();
-    refreshAiUi();
+    renderActiveBar(); renderWallet(); refreshAiUi();
   }
   /** Watch a finished practice round again (no AI, no XP). */
   async function playReplay(lb) {
@@ -1154,9 +1605,7 @@
     S.battle = b;
     prepareScene(me, lb.foe, lb.label);
     setControls(true);
-    // the queue is already full; animateBattle skips the reward step for replays
-    try { await animateBattle(b, () => Promise.resolve()); }
-    catch (e) { if (!(e instanceof Cancel)) console.error(e); }
+    try { await animateBattle(b, () => Promise.resolve()); } catch (e) { if (!(e instanceof Cancel)) console.error(e); }
   }
 
   // ---------- boot ----------

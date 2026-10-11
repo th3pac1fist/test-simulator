@@ -73,36 +73,75 @@ The creatures, move names and art are original to this project. The page only bo
 
 ## Fighter Lab: an AI-agent fighting game
 
-`apps/fighter-lab/` is a browser game, published as a claude.ai Artifact, built on top of the battle viewer. Every fighter is an AI agent. In a battle, Claude picks each move for both fighters, turn by turn.
+`apps/fighter-lab/` is a browser game, published as a claude.ai Artifact, built on top of the battle viewer. Every fighter is an AI agent. In a battle, Claude picks each action for both fighters, turn by turn.
 
-- **A fighter** is made of four things:
-  - a design (look, 4 moves, personality);
+- **A fighter** is made of:
+  - a look;
+  - a **loadout**: 4 skills, 1 passive and 1 held item;
+  - **stats**: a point per level for Power, Vitality or Speed;
+  - up to 4 **battle rules** (if-then, like Gladiabots);
   - a **persona** you write ("how it thinks");
-  - a **playbook** of lessons, written by an AI coach after training and battles;
-  - **instincts**, a small reinforcement-learning policy trained by gym practice.
+  - a **playbook** of lessons, written by an AI coach;
+  - **instincts**, a small reinforcement-learning policy trained in the gym.
 
-  Claude reads the persona, playbook and an instincts summary before every move.
-- **Rules:** four styles, each beating the next: Aggro → Social → Mind → Guard → Aggro (×2 effective, ×0.5 resisted). Both fighters choose at the same time and both hit, for 12 turns or until one is knocked out.
+  Claude reads all of this before every action. Rules fire first and skip Claude entirely.
+- **Combat:**
+  - **Styles:** four, each beating the next: Aggro → Social → Mind → Guard → Aggro (×2 effective, ×0.5 resisted).
+  - **Energy:** start with 3, gain 2 a turn, hold up to 10. Basic skills cost 0–2 and forged skills up to 7.
+  - **Cooldowns** on strong skills.
+  - **Statuses:** burn, poison, stun (followed by a turn of stun immunity), shield, regen, weaken and focus.
+  - **Turn order:** priority skills first, then the faster fighter.
+  - **Items** (one use per battle): Potion, Ether, Antidote, Smoke Bomb.
+  - **Length:** 12 turns or a knockout.
+- **Skill files:** a skill is JSON made from a fixed set of effects, so it always makes sense:
+  ```json
+  { "name": "FIREBALL", "style": "aggro", "element": "fire", "kind": "active",
+    "effects": [ {"type": "damage", "power": 3}, {"type": "burn", "chance": 0.3, "damage": 2, "turns": 3} ] }
+  ```
+  - The game prices every skill from its effects (`priceSkill`). The price sets its energy cost and cooldown.
+  - A level cap limits how strong a skill can be, so stronger skills unlock as your fighter levels up.
+  - Simulations check that equal-power skills win about equally often.
+- **Skill Forge** (Forge tab): two ways to make a skill.
+  - **Build it** from effect blocks, watching the price update live.
+  - **Describe it** ("shoots fireballs that set them on fire"): Claude drafts the file, then the game validates it, drops anything invented and scales it down to your level.
+- **Cycles**, the in-game currency (`economy.js`):
+  - **Earn:** rival wins (a big reward the first time), arena results (capped per day, nothing for beating your own fighters), and 100 to start.
+  - **Spend on:**
+    - gym rounds after the 30 free each day;
+    - compute: Overclock (Claude's bigger model for a battle), coach reviews, scouting reports, skill drafts;
+    - forging, items, stat resets.
+  - **Ledger:** append-only, and the balance can't go negative.
+  - **No cash value:** Cycles can't be transferred. [`docs/CRYPTO.md`](docs/CRYPTO.md) is the plan for a real token later.
 - **Getting stronger:**
-  - Gym practice is instant and uses no Claude. It builds XP and levels (capped at 50), move mastery (up to +50%) and instincts.
-  - The coach (one Claude request after training pauses, or after a battle) rewrites the playbook.
-  - Real battles give 3× XP and also train instincts.
-- **Rivals:** a ladder of 7 Claude-powered rivals, from level 3 to 35, each with its own persona, playbook and pre-trained instincts. Beat one to unlock the next.
-- **Arena:** players publish fighters and challenge each other's, with an Elo leaderboard. Each player writes only their own `arena/<id>` and `results/<id>` documents, and everything read from the arena is validated (`sanitizePublic`, `sanitizeResult`). Results are worked out in the challenger's browser and stats are self-reported, so it's a friendly league, not a tamper-proof one.
+  - **Gym practice** is instant and uses no Claude. It builds XP and levels (capped at 50), skill mastery (up to +50%) and instincts.
+  - **Spar by hand:** you choose every action, and the instincts learn by copying you (imitation learning, as in AI Arena).
+  - **Real battles** give 3× XP and also train instincts.
+- **Rivals:** a ladder of 7 Claude-powered rivals, from level 3 to 35, each with its own skills, persona and pre-trained instincts. Beat one to unlock the next.
+- **Arena:** players publish fighters and challenge each other's, with an Elo leaderboard.
+  - Each player writes only their own `arena/<id>` and `results/<id>` documents.
+  - Everything read from the arena is validated, and custom skills are re-priced on arrival, so a hand-edited file can't cheat.
+  - Results are worked out in the challenger's browser, so it's a friendly league, not a tamper-proof one.
 - **Built to fail safely:**
-  - Saves never block the game: they go to the browser first, then to the account in the background, with a status chip and Retry.
-  - Copies from other devices only replace newer local data when they have a higher revision.
-  - Battle turns skip Claude's answer cache.
-  - At most 2 Claude requests run at once, and nothing is retried in a loop. A failure falls back to instincts for that turn; a refusal or rate limit falls back for the rest of the battle.
-  - Your fighter's prompt never contains an opponent's persona, playbook or lines.
-  - All shared text is rendered as text, not HTML.
+  - **Saves never block the game:** they go to the browser first, then to the account in the background.
+  - **Accounts stay separate:** the on-device backup is tagged with its account, so two accounts on one browser never share fighters or Cycles.
+  - **Claude requests:**
+    - at most 2 run at once, and nothing is retried in a loop;
+    - an illegal or failed choice falls back to instincts;
+    - a failed paid request is refunded.
+  - **Your fighter's prompt** never contains an opponent's persona, playbook, lines or custom skill names; their skills are described in the game's own words.
+  - **Shared text** is rendered as text, not HTML.
 - **Code:**
-  - `engine.js`: rules, instincts, training, rivals, arena helpers; no DOM.
-  - `agent.js`: prompts, reply parsing, the AI battle runner, the coach. It takes a `sample` function, so tests can pass in a fake.
+  - `engine.js`: rules, skills and pricing, instincts, training, rivals, arena helpers; no DOM.
+  - `economy.js`: the Cycles ledger, prices and rewards.
+  - `agent.js`: prompts, reply parsing, the AI battle runner, skill drafts, scouting and the coach. It takes a `sample` function, so tests can pass in a fake.
   - `sprites.js`: the pixel creatures.
   - `app.js`: the UI.
   - `index.html`: layout and styles.
-- **Tests:** `node --test apps/fighter-lab/engine.test.mjs apps/fighter-lab/agent.test.mjs`. These include checks that training raises win rate, that the AI runner falls back correctly, and that opponents' text stays out of prompts.
+- **Tests:** `node --test apps/fighter-lab/*.test.mjs`. They cover:
+  - skill pricing and validation, status effects, rules and migration of older saves;
+  - balance simulations;
+  - ledger math and daily caps;
+  - the AI runner's fallbacks, and that opponents' text stays out of prompts.
 
 ## Mock server
 

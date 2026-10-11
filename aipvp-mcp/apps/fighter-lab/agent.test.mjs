@@ -1,4 +1,4 @@
-// Run: node --test apps/fighter-lab/
+// Run: node --test apps/fighter-lab/agent.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -29,167 +29,200 @@ function fakeSample(answer, { delay = 2 } = {}) {
   return { sample: fn, calls, get maxInFlight() { return maxInFlight; } };
 }
 const nameOf = (prompt) => /You are the battle brain of (.+?), a fighter/.exec(prompt)[1];
-const firstMove = (prompt) => /YOUR MOVES[^\n]*\n- (\w+):/.exec(prompt)[1];
+/** the first action the prompt lists as available */
+const firstAvailable = (prompt) => {
+  const block = prompt.split("YOUR ACTIONS")[1].split("\n\n")[0];
+  return [...block.matchAll(/^- (\w+): (.*)$/gm)].find((m) => !/\[(ON COOLDOWN|NOT ENOUGH ENERGY|ALREADY USED)/.test(m[2]))[1];
+};
 
 function pair() {
-  const me = E.createFighter({ name: "HERO", moves: BALANCED }, E.rng(1));
+  const fb = E.validateSkill({ id: "fireball", name: "FIREBALL", style: "aggro", effects: [{ type: "damage", power: 3 }, { type: "burn", chance: 0.3, damage: 2, turns: 3 }] }).skill;
+  const me = E.createFighter({ name: "HERO", moves: ["fireball", "talk", "strategize", "shield"], custom: { fireball: fb }, item: "potion" }, E.rng(1));
   me.persona = "Patient. Read them first.";
   const foe = E.rivalFighter("velvet");
   foe.persona = "SECRET-PERSONA-123"; foe.playbook = "- SECRET-PLAYBOOK";
+  const secret = E.validateSkill({ id: "secretsk", name: "SECRETMOVE", style: "social", effects: [{ type: "damage", power: 2 }] }).skill;
+  foe.custom = { ...foe.custom, secretsk: secret };
+  foe.moves = ["talk", "negotiate", "secretsk", "observe"];
+  foe.rules = [];
   return { me, foe };
 }
 
-test("an all-AI battle finishes, with Claude's moves and lines on every turn", async () => {
+test("an all-AI battle finishes, with Claude's actions and lines", async () => {
   const { me, foe } = pair();
-  const f = fakeSample((p) => ({ move: firstMove(p), line: `${nameOf(p)} SECRET-LINE says hi` }));
+  const f = fakeSample((p) => ({ action: firstAvailable(p), line: `${nameOf(p)} says hi` }));
   const seen = [];
   const out = await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3), onTurn: (t) => seen.push(t) });
   assert.ok(out.match.turns.length >= 1 && out.match.turns.length <= 12);
   assert.equal(seen.length, out.match.turns.length);
-  for (const t of out.match.turns) for (const a of t.actions) { assert.equal(a.source, "ai"); assert.match(a.line, /says hi/); }
-  assert.equal(out.stats.instinct, 0);
-  assert.equal(f.calls.length, 2 * out.match.turns.length);
+  assert.ok(out.stats.ai > 0);
+  for (const t of out.match.turns) for (const a of t.actions) if (a.source === "ai") assert.match(a.line, /says hi/);
   assert.ok(f.maxInFlight <= 2, "never more than 2 Claude requests at once");
   for (const c of f.calls) { assert.equal(c.opts.cache, false); assert.equal(c.opts.modelTier, "quick"); }
 });
 
-test("a fighter's prompt never contains the opponent's persona, playbook or lines", async () => {
+test("a fighter's prompt never contains the opponent's text or custom skill names", async () => {
   const { me, foe } = pair();
-  const f = fakeSample((p) => ({ move: firstMove(p), line: "SECRET-LINE" }));
+  const f = fakeSample((p) => ({ action: firstAvailable(p), line: "SECRET-LINE" }));
   await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3) });
   const heroPrompts = f.calls.filter((c) => nameOf(c.prompt) === "HERO").map((c) => c.prompt);
   assert.ok(heroPrompts.length > 0);
   for (const p of heroPrompts) {
-    assert.ok(!p.includes("SECRET-PERSONA-123") && !p.includes("SECRET-PLAYBOOK") && !p.includes("SECRET-LINE"));
+    for (const secret of ["SECRET-PERSONA-123", "SECRET-PLAYBOOK", "SECRET-LINE", "SECRETMOVE"]) assert.ok(!p.includes(secret), `leaked ${secret}`);
     assert.ok(p.includes("Patient. Read them first."));
+    assert.match(p, /energy \d+\/10/);
+    assert.match(p, /FIREBALL/);   // your own custom skill names are fine
   }
-  // and each fighter does get its own persona
-  assert.ok(f.calls.some((c) => nameOf(c.prompt) === "VELVET" && c.prompt.includes("SECRET-PERSONA-123")));
+  assert.ok(f.calls.some((c) => nameOf(c.prompt) === "VELVET" && c.prompt.includes("SECRET-PERSONA-123")), "each side gets its own persona");
 });
 
 test("both picks for a turn are made from the same completed turns", async () => {
   const { me, foe } = pair();
-  const f = fakeSample((p) => ({ move: firstMove(p), line: "" }));
+  const f = fakeSample((p) => ({ action: firstAvailable(p) }));
   await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3) });
-  for (let k = 0; k < f.calls.length; k += 2) {
-    const turnOf = (p) => +/NOW: turn (\d+)/.exec(p)[1];
-    const histOf = (p) => (p.match(/^T\d+: you /gm) || []).length;
-    const [x, y] = [f.calls[k].prompt, f.calls[k + 1].prompt];
-    assert.equal(turnOf(x), turnOf(y));
-    assert.equal(histOf(x), turnOf(x) - 1);
-    assert.equal(histOf(y), turnOf(y) - 1);
+  const byTurn = {};
+  for (const c of f.calls) { const t = +/NOW: turn (\d+)/.exec(c.prompt)[1]; (byTurn[t] ||= []).push(c.prompt); }
+  for (const [t, ps] of Object.entries(byTurn)) {
+    assert.ok(ps.length <= 2);
+    for (const p of ps) assert.equal((p.match(/^T\d+: you /gm) || []).length, Math.min(8, t - 1));
   }
 });
 
-test("bad answers fall back to instincts for that turn only", async () => {
+test("unreadable or illegal answers fall back to instincts for that turn only", async () => {
   const { me, foe } = pair();
   const f = fakeSample((p, n) => {
-    if (nameOf(p) !== "HERO") return { move: firstMove(p), line: "ok" };
+    if (nameOf(p) !== "HERO") return { action: firstAvailable(p) };
     if (n % 3 === 0) throw { code: "invalid_json", message: "no json" };
-    if (n % 3 === 1) return { move: "laser-eyes", line: "x" };
-    return { move: "BULWARK", line: "by name" }; // move given by its name, not its id
+    if (n % 3 === 1) return { action: "laser-eyes" };
+    return { action: "FIREBALL", line: "by name" };   // may be unaffordable: then it's illegal, not crashed
   });
   const out = await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3) });
   const hero = out.match.turns.map((t) => t.actions[0]);
   assert.ok(hero.some((a) => a.source === "instinct"));
-  assert.ok(hero.some((a) => a.source === "ai" && a.skill === "shield"));
-  assert.ok(out.stats.reasons.invalid_json || out.stats.reasons.invalid_reply);
+  assert.ok(out.stats.reasons.invalid_json || out.stats.reasons.invalid_reply || out.stats.reasons.illegal_action);
   assert.equal(out.stoppedReason, null);
-  assert.ok(out.match.turns.every((t) => t.actions[1].source === "ai"));
+});
+
+test("an action on cooldown or beyond your energy is never played", async () => {
+  const { me, foe } = pair();
+  const meteor = E.validateSkill({ id: "meteor", name: "METEOR", style: "aggro", effects: [{ type: "damage", power: 6 }] }).skill;
+  assert.ok(meteor.energy >= 3 && meteor.cooldown >= 1);
+  me.custom.meteor = meteor; me.moves = ["meteor", "talk", "strategize", "shield"];
+  const f = fakeSample((p) => (nameOf(p) === "HERO" ? { action: "meteor" } : { action: firstAvailable(p) }));
+  const out = await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3) });
+  assert.ok(out.stats.reasons.illegal_action > 0, "METEOR every turn hits its cooldown and energy limits");
+  for (const t of out.match.turns) assert.ok(!t.actions[0].fizzled);
+});
+
+test("battle rules fire without asking Claude", async () => {
+  const { me, foe } = pair();
+  me.rules = E.sanitizeRules([{ when: { kind: "phase_is", value: "opening" }, do: { skill: "talk" } }], me.moves);
+  const f = fakeSample((p) => ({ action: firstAvailable(p) }));
+  const out = await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3) });
+  const opening = out.match.turns.filter((t) => t.turn <= 4).map((t) => t.actions[0]);
+  assert.ok(opening.every((a) => a.source === "rule" && a.skill === "talk"));
+  assert.ok(!f.calls.some((c) => nameOf(c.prompt) === "HERO" && /NOW: turn [1-4] /.test(c.prompt)));
+  assert.ok(out.stats.rule >= 4);
 });
 
 test("rate limiting switches the rest of the battle to instincts, without retrying", async () => {
   const { me, foe } = pair();
   let n = 0;
-  const f = fakeSample((p) => { if (++n === 5) throw { code: "rate_limited", message: "slow down" }; return { move: firstMove(p), line: "" }; });
+  const f = fakeSample((p) => { if (++n === 5) throw { code: "rate_limited", message: "slow down" }; return { action: firstAvailable(p) }; });
   const out = await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3) });
   assert.equal(out.stoppedReason, "rate_limited");
-  assert.ok(f.calls.length <= 6, `stopped calling Claude (made ${f.calls.length} calls)`);
-  const last = out.match.turns.at(-1);
-  assert.ok(last.actions.every((a) => a.source === "instinct"));
+  assert.ok(f.calls.length <= 6);
 });
 
-test("Claude declined: every move comes from instincts and the battle still finishes", async () => {
+test("Claude declined or unavailable: instincts play the whole battle", async () => {
   const { me, foe } = pair();
   const f = fakeSample(() => { throw { code: "not_granted", message: "no" }; });
   const out = await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3) });
   assert.equal(out.stoppedReason, "not_granted");
   assert.ok(f.calls.length <= 2);
-  assert.ok(out.match.turns.length >= 1);
+  const out2 = await A.runAiBattle({ a: me, b: foe, sample: null, rng: E.rng(3) });
+  assert.equal(out2.stats.ai, 0);
 });
 
-test("no sample at all means an instinct battle", async () => {
+test("Overclock asks for the bigger model with low effort, only for that side", async () => {
   const { me, foe } = pair();
-  const out = await A.runAiBattle({ a: me, b: foe, sample: null, rng: E.rng(3) });
-  assert.equal(out.stats.ai, 0);
-  assert.ok(out.match.turns.every((t) => t.actions.every((a) => a.source === "instinct")));
+  const f = fakeSample((p) => ({ action: firstAvailable(p) }));
+  await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3), tiers: ["overclock", "quick"] });
+  for (const c of f.calls) {
+    if (nameOf(c.prompt) === "HERO") assert.deepEqual([c.opts.modelTier, c.opts.effort], ["default", "low"]);
+    else assert.equal(c.opts.modelTier, "quick");
+  }
 });
 
-test("Stop cancels the battle and pending Claude requests", async () => {
+test("a scouting report goes only into its own side's prompts", async () => {
+  const { me, foe } = pair();
+  const f = fakeSample((p) => ({ action: firstAvailable(p) }));
+  await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3), scouting: ["- PLAN-X: open with BULWARK", null] });
+  for (const c of f.calls) assert.equal(c.prompt.includes("PLAN-X"), nameOf(c.prompt) === "HERO");
+});
+
+test("Stop cancels the battle and pending requests", async () => {
   const { me, foe } = pair();
   const ctl = new AbortController();
-  const f = fakeSample((p) => ({ move: firstMove(p), line: "" }), { delay: 30 });
-  const run = A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3), signal: ctl.signal,
-    onTurn: (t) => { if (t.turn === 2) ctl.abort(); } });
+  const f = fakeSample((p) => ({ action: firstAvailable(p) }), { delay: 30 });
+  const run = A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3), signal: ctl.signal, onTurn: (t) => { if (t.turn === 2) ctl.abort(); } });
   await assert.rejects(run, (e) => e instanceof A.Cancelled);
   const callsAtStop = f.calls.length;
   await new Promise((r) => setTimeout(r, 80));
-  assert.equal(f.calls.length, callsAtStop, "no requests after Stop");
+  assert.equal(f.calls.length, callsAtStop);
 });
 
-test("pace() holds the next turn until the page is ready", async () => {
-  const { me, foe } = pair();
-  const f = fakeSample((p) => ({ move: firstMove(p), line: "" }), { delay: 0 });
-  let release;
-  let paced = 0;
-  const run = A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3),
-    pace: () => { paced++; return paced <= 2 ? Promise.resolve() : new Promise((r) => (release = r)); } });
-  await new Promise((r) => setTimeout(r, 30));
-  assert.equal(f.calls.length, 4, "only 2 turns requested while the page is busy");
-  // let it run to the end
-  const drain = setInterval(() => release && release(), 1);
-  await run; clearInterval(drain);
-});
-
-test("the original fighters are not modified by a battle", async () => {
+test("the original fighters are not modified, but instincts learn when asked", async () => {
   const { me, foe } = pair();
   const before = JSON.stringify([me, foe]);
-  const f = fakeSample((p) => ({ move: firstMove(p), line: "" }));
-  await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3), learnA: true });
+  const f = fakeSample((p) => ({ action: firstAvailable(p) }));
+  const out = await A.runAiBattle({ a: me, b: foe, sample: f.sample, rng: E.rng(3), learnA: true });
   assert.equal(JSON.stringify([me, foe]), before);
+  assert.notDeepEqual(out.fighterA.brain, me.brain, "instincts learned from Claude's battle");
 });
 
 test("prompts stay small even with maximum-length text", () => {
   const { me, foe } = pair();
   me.persona = "p".repeat(5000); me.playbook = "- x\n".repeat(2000);
-  const st = E.newBattle(me, foe);
-  const r = E.rng(1);
+  const st = E.newBattle(me, foe), r = E.rng(1);
   while (!st.over) E.resolveTurn(st, [E.instinctChoice(st, 0, r), E.instinctChoice(st, 1, r)], r);
   st.over = false; st.turn = 12;
-  const p = A.turnPrompt(st, 0);
-  assert.ok(p.length < 8000, `prompt is ${p.length} chars`);
+  const p = A.turnPrompt(st, 0, { scouting: "s".repeat(5000) });
+  assert.ok(p.length < 10000, `prompt is ${p.length} chars`);
 });
 
-test("parseTurn accepts ids or names and cleans the line", () => {
-  assert.deepEqual(A.parseTurn({ move: "Strike", line: '  "Take\nthat!"  ' }, BALANCED), { skill: "fight", line: "Take that!" });
-  assert.deepEqual(A.parseTurn('{"move":"shield"}', BALANCED), { skill: "shield", line: "" });
-  assert.equal(A.parseTurn({ move: "code" }, BALANCED), null);
-  assert.equal(A.parseTurn("nope", BALANCED), null);
-  assert.equal(A.parseTurn({ move: "talk", line: "x".repeat(300) }, BALANCED).line.length, 88);
-});
-
-test("the coach rewrites the playbook within limits", async () => {
+test("parseTurn accepts ids, names and item", () => {
   const { me } = pair();
-  const report = E.train(me, "brawler", 10, { rng: E.rng(2) }).report;
-  const prompt = A.coachPrompt(me, A.gymSummary(report));
-  assert.match(prompt, /BRAWLER/); assert.match(prompt, /INSTINCTS LEARNED/);
+  assert.deepEqual(A.parseTurn({ action: "Fireball", line: '  "Take\nthat!"  ' }, me), { action: { kind: "skill", skill: "fireball" }, line: "Take that!" });
+  assert.deepEqual(A.parseTurn('{"move":"talk"}', me), { action: { kind: "skill", skill: "talk" }, line: "" });
+  assert.deepEqual(A.parseTurn({ action: "potion" }, me).action, { kind: "item" });
+  assert.equal(A.parseTurn({ action: "code" }, me), null);
+  assert.equal(A.parseTurn("nope", me), null);
+});
+
+test("describe-a-skill: Claude's draft is validated, scaled to the level and priced", async () => {
+  const f = fakeSample(() => ({ name: "Sun Lance", style: "aggro", element: "light", effects: [{ type: "damage", power: 99 }, { type: "burn", chance: 1, damage: 4, turns: 4 }, { type: "nuke" }], why: "A burning spear of light." }));
+  const d = await A.draftSkill(f.sample, "a spear of sunlight that burns", "active", 1);
+  assert.ok(d.skill.budget <= E.maxSkillBudget(1));
+  assert.ok(d.skill.energy >= 1);
+  assert.equal(d.why, "A burning spear of light.");
+  assert.match(f.calls[0].prompt, /a spear of sunlight that burns/);
+  const bad = fakeSample(() => ({ name: "x", effects: [{ type: "teleport" }] }));
+  await assert.rejects(A.draftSkill(bad.sample, "teleport", "active", 5), (e) => e.code === "invalid_reply");
+  const pas = fakeSample(() => ({ name: "Second wind", kind: "passive", effects: [{ type: "regen", heal: 4, every: 2 }] }));
+  const pd = await A.draftSkill(pas.sample, "heal every two turns", "passive", 1);
+  assert.equal(pd.skill.kind, "passive"); assert.ok(pd.scaled);
+});
+
+test("scouting and coaching parse safely", async () => {
+  const { me, foe } = pair();
+  const s = fakeSample(() => ({ plan: "- Open with BULWARK\n- FIREBALL at 4 energy" }));
+  assert.match(await A.scout(s.sample, me, foe), /BULWARK/);
+  assert.ok(!s.calls[0].prompt.includes("SECRETMOVE"), "scouting also hides custom names");
   const long = Array.from({ length: 20 }, (_, i) => `lesson ${i}`).join("\n");
   const out = A.parseCoach({ playbook: long, comment: "c".repeat(500) });
   assert.equal(out.playbook.split("\n").length, 8);
-  assert.ok(out.playbook.split("\n").every((l) => l.startsWith("- ")));
   assert.equal(out.comment.length, 200);
   assert.equal(A.parseCoach({ playbook: "" }), null);
-  const f = fakeSample(() => ({ playbook: "- Block brawlers with BULWARK", comment: "Nice." }));
-  assert.deepEqual(await A.coach(f.sample, me, "x"), { playbook: "- Block brawlers with BULWARK", comment: "Nice." });
-  assert.equal(f.calls[0].opts.cache, false);
+  assert.match(A.coachPrompt(me, "x"), /FIREBALL/);
 });

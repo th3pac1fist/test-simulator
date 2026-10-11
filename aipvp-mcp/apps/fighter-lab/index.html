@@ -57,10 +57,10 @@ button, input, select { font: inherit; color: inherit; }
 .store.db::before { background: var(--good); }
 
 /* tabs */
-.tabs { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; display: grid; grid-template-columns: repeat(5, 1fr);
+.tabs { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; display: grid; grid-template-columns: repeat(6, 1fr);
   gap: 4px; padding: 4px; background: var(--bezel); border-radius: 12px; }
 .tab { appearance: none; border: 0; background: transparent; color: #c9d2cc; padding: 10px 2px; border-radius: 9px; cursor: pointer;
-  font-family: var(--font-label); font-size: clamp(10px, 2.9vw, 12px); letter-spacing: 0.06em; text-transform: uppercase; }
+  font-family: var(--font-label); font-size: clamp(9px, 2.5vw, 12px); letter-spacing: 0.03em; text-transform: uppercase; min-width: 0; }
 .tab[aria-selected="true"] { background: var(--accent); color: #fff; }
 .tab:focus-visible, .btn:focus-visible, .seg button:focus-visible, .card:focus-visible, .skill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -289,20 +289,90 @@ textarea:focus-visible, .field input[type="text"]:focus-visible { outline: 2px s
 .coach { display: grid; gap: 8px; padding: 12px; border-radius: 10px; background: var(--panel-2); }
 .coach pre { margin: 0; white-space: pre-wrap; font: inherit; font-size: 13px; }
 @media (prefers-reduced-motion: reduce) { .dots::after { animation: none; content: "..."; } }
+
+/* ---- v3 additions: wallet, loadout, rules, stats, forge, shop, spar, energy and statuses ---- */
+.top-right { gap: 12px; }
+.wallet { appearance: none; border: 1px solid var(--line); background: var(--panel); border-radius: 999px; padding: 6px 12px; cursor: pointer; min-height: 36px;
+  font-family: var(--font-label); font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; font-variant-numeric: tabular-nums;
+  display: inline-flex; align-items: center; gap: 6px; }
+.wallet::before { content: ""; width: 10px; height: 10px; border-radius: 3px; background: #e2b628; transform: rotate(45deg); }
+.wallet:focus-visible, .act:focus-visible, select:focus-visible, input[type="number"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pts-badge { font-weight: 400; color: var(--accent); }
+select, input[type="number"] { border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 8px 10px; min-height: 38px; max-width: 100%; min-width: 0; }
+input[type="number"] { width: 5.5em; font-variant-numeric: tabular-nums; }
+.field select { width: 100%; }
+.slots { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.slot { display: grid; gap: 4px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; box-shadow: inset 4px 0 0 var(--c, var(--line)); background: var(--bg); min-width: 0; }
+.slot .lab { font-family: var(--font-label); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.slot select { width: 100%; }
+.slot .note { font-size: 12px; }
+.rules { display: grid; gap: 8px; }
+.rule { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px; border-radius: 10px; background: var(--panel-2); min-width: 0; }
+.rule select { flex: 1 1 9em; }
+.btn.icon { min-height: 36px; min-width: 36px; padding: 0; display: inline-grid; place-items: center; font-family: var(--font-body); font-size: 18px; line-height: 1; letter-spacing: 0; }
+.stat-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.stat-row:last-of-type { border-bottom: 0; }
+.stepper { display: inline-flex; align-items: center; gap: 8px; }
+.stepper .num { font-family: var(--font-display); font-size: 20px; min-width: 1.6em; text-align: center; font-variant-numeric: tabular-nums; }
+.fx-list { display: grid; gap: 8px; }
+.fx-row { display: grid; gap: 8px; padding: 10px; border-radius: 10px; background: var(--panel-2); min-width: 0; }
+.fx-row .row select { flex: 1; }
+.params { display: grid; gap: 8px 14px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+.param { display: grid; gap: 2px; min-width: 0; }
+.param .lab { font-family: var(--font-label); font-size: 10px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
+.param .lab b { color: var(--fg); font-family: var(--font-body); font-weight: 600; font-variant-numeric: tabular-nums; }
+.price { display: grid; gap: 6px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); }
+.meter { height: 8px; border-radius: 99px; background: var(--chip-bg); overflow: hidden; }
+.meter span { display: block; height: 100%; border-radius: 99px; background: var(--good); transition: width 200ms ease; }
+.meter.over span { background: var(--accent); }
+.ledger { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.ledger li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 2px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.ledger li span { min-width: 0; overflow-wrap: anywhere; }
+.ledger li b { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ledger .plus { color: var(--good); } .ledger .minus { color: var(--accent); }
+.shop { display: grid; gap: 8px; }
+.shop-item, .lib-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); min-width: 0; }
+.shop-item > div, .lib-item > div { min-width: 0; overflow-wrap: anywhere; }
+.shop-item .btn { flex: none; }
+.lib-item { box-shadow: inset 4px 0 0 var(--c, var(--line)); }
+.acts { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+.act { appearance: none; text-align: left; display: grid; gap: 2px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); cursor: pointer;
+  box-shadow: inset 4px 0 0 var(--c, var(--muted)); min-height: 52px; min-width: 0; }
+.act b { font-family: var(--font-label); font-size: 12px; font-weight: 400; letter-spacing: 0.04em; overflow-wrap: anywhere; }
+.act span { font-size: 12px; color: var(--muted); }
+.act:hover:not([disabled]) { border-color: var(--c, var(--muted)); }
+.act[disabled] { opacity: 0.45; cursor: not-allowed; }
+.hud-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6cqw 1.2cqw; min-height: 1.4cqw; }
+.energy { display: inline-flex; gap: 0.35cqw; align-items: center; }
+.energy i { display: block; width: 1.1cqw; height: 1.1cqw; min-width: 4px; min-height: 4px; border-radius: 1px; background: #c9cfc9; transform: rotate(45deg); }
+.energy i.on { background: #2f86c8; }
+.statuses { display: inline-flex; flex-wrap: wrap; gap: 0.4cqw; }
+.st { font-family: var(--font-label); font-size: max(8px, 1.5cqw); letter-spacing: 0.02em; padding: 0.2cqw 0.6cqw; border-radius: 3px; background: #56677a; color: #fff; white-space: nowrap; }
+.st-burn { background: #d0582a; } .st-poison { background: #7a4aa8; } .st-stun { background: #c9a01e; color: #232a2e; }
+.st-shield { background: #2f86c8; } .st-regen { background: #2f8f4e; } .st-weaken { background: #6d6d6d; } .st-focus { background: #c2457e; }
+.st-smoke { background: #4d5961; }
+.src.rule { border-color: var(--good); color: var(--good); }
+.src.you { border-color: var(--fg); color: var(--fg); }
+.airow > span { flex: 1 1 12em; min-width: 0; }
+@media (max-width: 460px) { .slots, .acts { grid-template-columns: 1fr 1fr; } .slot select { font-size: 13px; } }
 </style>
 
 <main class="wrap">
   <header class="top">
     <div class="brand">
       <h1>Fighter Lab</h1>
-      <p>Build AI fighters, train them, and battle rivals and friends.</p>
+      <p>Build AI fighters, forge their skills, train them, and battle rivals and friends.</p>
     </div>
-    <button class="store" id="store" type="button" disabled>Starting…</button>
+    <div class="row top-right">
+      <button class="wallet" id="wallet" type="button" aria-label="Wallet and shop">… Cycles</button>
+      <button class="store" id="store" type="button" disabled>Starting…</button>
+    </div>
   </header>
 
   <nav class="tabs" role="tablist" aria-label="Sections">
     <button class="tab" role="tab" data-tab="roster">Roster</button>
     <button class="tab" role="tab" data-tab="design">Design</button>
+    <button class="tab" role="tab" data-tab="forge">Forge</button>
     <button class="tab" role="tab" data-tab="gym">Gym</button>
     <button class="tab" role="tab" data-tab="battle">Battle</button>
     <button class="tab" role="tab" data-tab="arena">Arena</button>
@@ -314,6 +384,7 @@ textarea:focus-visible, .field input[type="text"]:focus-visible { outline: 2px s
 <div class="toast" id="toast" role="status" hidden></div>
 
 <script src="engine.js"></script>
+<script src="economy.js"></script>
 <script src="agent.js"></script>
 <script src="sprites.js"></script>
 <script src="app.js"></script>
