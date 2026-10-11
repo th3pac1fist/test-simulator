@@ -71,15 +71,38 @@ Each match plays out as an animated battle. The two agents appear as pixel creat
 
 The creatures, move names and art are original to this project. The page only borrows the familiar layout of a handheld battle screen.
 
-## Fighter Lab (design and train fighters)
+## Fighter Lab: an AI-agent fighting game
 
-`apps/fighter-lab/` is a browser game built on top of the battle viewer. Design a fighter (look, personality and 4 moves), train it in a gym, and watch it battle. It runs entirely in the browser and is published as a claude.ai Artifact. Fighters save to the player's private storage there, or to the browser when that isn't available.
+`apps/fighter-lab/` is a browser game, published as a claude.ai Artifact, built on top of the battle viewer. Every fighter is an AI agent. In a battle, Claude picks each move for both fighters, turn by turn.
 
-- **Rules:** four styles, each beating the next: Aggro → Social → Mind → Guard → Aggro. A super-effective hit does ×2 damage and a resisted hit ×0.5. Both fighters hit each turn for 12 turns or until one is knocked out.
-- **Getting stronger:** XP raises a fighter's level (more HP and damage, capped at 50). Using a move in training builds mastery (up to +50% damage). Each fighter has a brain, a small reinforcement-learning policy keyed on the battle phase and the opponent's last style, which learns which moves work. Practice partners match your level, so beating them takes strategy; coaches unlock at levels 5, 10 and 20.
-- **aipvp:** the designer shows the `aipvp agent create …` command for a design. Gym training doesn't transfer, because aipvp.io scores matches its own way.
-- Code: `engine.js` (rules, brain, training; no DOM), `sprites.js` (pixel creatures), `index.html` (the app).
-- Tests: `node --test apps/fighter-lab/engine.test.mjs`. These include checks that training measurably raises win rate, and that the brain learns a rotating opponent's pattern.
+- **A fighter** is made of four things:
+  - a design (look, 4 moves, personality);
+  - a **persona** you write ("how it thinks");
+  - a **playbook** of lessons, written by an AI coach after training and battles;
+  - **instincts**, a small reinforcement-learning policy trained by gym practice.
+
+  Claude reads the persona, playbook and an instincts summary before every move.
+- **Rules:** four styles, each beating the next: Aggro → Social → Mind → Guard → Aggro (×2 effective, ×0.5 resisted). Both fighters choose at the same time and both hit, for 12 turns or until one is knocked out.
+- **Getting stronger:**
+  - Gym practice is instant and uses no Claude. It builds XP and levels (capped at 50), move mastery (up to +50%) and instincts.
+  - The coach (one Claude request after training pauses, or after a battle) rewrites the playbook.
+  - Real battles give 3× XP and also train instincts.
+- **Rivals:** a ladder of 7 Claude-powered rivals, from level 3 to 35, each with its own persona, playbook and pre-trained instincts. Beat one to unlock the next.
+- **Arena:** players publish fighters and challenge each other's, with an Elo leaderboard. Each player writes only their own `arena/<id>` and `results/<id>` documents, and everything read from the arena is validated (`sanitizePublic`, `sanitizeResult`). Results are worked out in the challenger's browser and stats are self-reported, so it's a friendly league, not a tamper-proof one.
+- **Built to fail safely:**
+  - Saves never block the game: they go to the browser first, then to the account in the background, with a status chip and Retry.
+  - Copies from other devices only replace newer local data when they have a higher revision.
+  - Battle turns skip Claude's answer cache.
+  - At most 2 Claude requests run at once, and nothing is retried in a loop. A failure falls back to instincts for that turn; a refusal or rate limit falls back for the rest of the battle.
+  - Your fighter's prompt never contains an opponent's persona, playbook or lines.
+  - All shared text is rendered as text, not HTML.
+- **Code:**
+  - `engine.js`: rules, instincts, training, rivals, arena helpers; no DOM.
+  - `agent.js`: prompts, reply parsing, the AI battle runner, the coach. It takes a `sample` function, so tests can pass in a fake.
+  - `sprites.js`: the pixel creatures.
+  - `app.js`: the UI.
+  - `index.html`: layout and styles.
+- **Tests:** `node --test apps/fighter-lab/engine.test.mjs apps/fighter-lab/agent.test.mjs`. These include checks that training raises win rate, that the AI runner falls back correctly, and that opponents' text stays out of prompts.
 
 ## Mock server
 

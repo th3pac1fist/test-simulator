@@ -117,3 +117,78 @@ test("aipvp command is shell-safe", () => {
   assert.equal(E.aipvpCommand(f),
     "aipvp agent create --name 'O'\\''BRIEN' --skills fight,talk,strategize,shield --aggression 0.50 --caution 0.50 --creativity 0.50 --loyalty 0.50");
 });
+
+test("stepping a battle by hand gives the same result as fight()", () => {
+  const f = E.createFighter({ name: "A", moves: BALANCED }, E.rng(1));
+  const foe = E.partnerFighter("cycler", f);
+  const whole = E.fight(E.clone(f), E.clone(foe), { rng: E.rng(5) });
+  const r = E.rng(5), st = E.newBattle(E.clone(f), E.clone(foe));
+  while (!st.over) E.resolveTurn(st, [E.instinctChoice(st, 0, r), E.instinctChoice(st, 1, r)], r);
+  assert.deepEqual(E.finishBattle(st), whole);
+  assert.throws(() => E.resolveTurn(st, [{ skill: "fight" }, { skill: "fight" }], r), /over/);
+});
+
+test("a move the fighter doesn't know is rejected", () => {
+  const st = E.newBattle(E.createFighter({ moves: BALANCED }), E.createFighter({ moves: BALANCED }));
+  assert.throws(() => E.resolveTurn(st, [{ skill: "code" }, { skill: "fight" }], E.rng(1)), /doesn't know/);
+});
+
+test("old saved fighters are upgraded without losing progress", () => {
+  const old = E.createFighter({ name: "OLD", moves: BALANCED }, E.rng(1));
+  delete old.persona; delete old.playbook; delete old.rev; delete old.battleRecord; old.version = 1; old.xp = 500;
+  const g = E.upgradeFighter(old);
+  assert.equal(g.persona, ""); assert.equal(g.playbook, ""); assert.equal(g.rev, 0);
+  assert.deepEqual(g.battleRecord, { w: 0, l: 0, d: 0 });
+  assert.equal(g.xp, 500); assert.deepEqual(g.brain, old.brain);
+});
+
+test("real battles give 3x XP and a battle record", () => {
+  const f = E.createFighter({ moves: BALANCED });
+  const match = { winner: 0, agents: [{ level: 1 }, { level: 1 }] };
+  const out = E.awardBattle(f, match, 0);
+  assert.equal(out.result, "win"); assert.equal(out.xp, 90); assert.equal(out.fighter.battleRecord.w, 1);
+  assert.equal(E.awardBattle(f, { winner: null, agents: match.agents }, 0).result, "draw");
+});
+
+test("rivals are deterministic and climb in level", () => {
+  assert.deepEqual(E.rivalFighter("sal"), E.rivalFighter("sal"));
+  const levels = E.RIVALS.map((r) => E.rivalFighter(r.id).level);
+  assert.deepEqual(levels, [...levels].sort((a, b) => a - b));
+  assert.ok(E.rivalFighter("kade").persona.length > 0);
+});
+
+test("published fighters from other players are sanitized", () => {
+  const mine = E.toPublic(E.createFighter({ name: "PUB", moves: BALANCED }));
+  const ok = E.sanitizePublic(mine, "u_1");
+  assert.equal(ok.name, "PUB"); assert.equal(ok.owner, "u_1");
+  const hostile = {
+    ...mine, name: "<img src=x onerror=alert(1)>", persona: "x".repeat(5000), playbook: "a\u0000b\nc",
+    level: 9999, uses: { fight: 1e12, talk: "lots" }, design: { hue: "red", body: "<script>", spikes: 99, armor: "yes" },
+    personality: { aggression: 7 }, brain: { W: [[1, 2]], b: [] },
+  };
+  const h = E.sanitizePublic(hostile, "u_2");
+  assert.equal(h.name, "IMG SRCX ONERR"); // cut to 16 characters, then unsafe characters removed
+  assert.ok(!/[<>]/.test(h.name));
+  assert.equal(h.persona.length, E.PERSONA_MAX);
+  assert.equal(h.playbook, "a b\nc");
+  assert.equal(h.level, E.MAX_LEVEL);
+  assert.equal(h.uses.fight, 1e6); assert.equal(h.uses.talk, 0);
+  assert.deepEqual([h.design.hue, h.design.body, h.design.spikes, h.design.armor], [200, "round", 3, false]);
+  assert.equal(h.personality.aggression, 1);
+  assert.equal(h.brain.W.length, 15); // malformed brain replaced with a fresh one
+  // and the engine can fight with it
+  assert.ok(E.fight(E.createFighter({ moves: BALANCED }), h, { rng: E.rng(1) }).turns.length > 0);
+  for (const bad of [null, [], "x", { ...mine, id: "../etc" }, { ...mine, moves: ["fight", "fight", "talk", "code"] }, { ...mine, moves: ["fight", "talk", "code", "__proto__"] }])
+    assert.equal(E.sanitizePublic(bad, "u"), null);
+});
+
+test("arena results: only your own fights count, Elo replays in time order", () => {
+  const A = { owner: "u_a", id: "fa", name: "AYE" }, B = { owner: "u_b", id: "fb", name: "BEE" };
+  assert.equal(E.sanitizeResult({ at: 1, a: B, b: A, winner: 0 }, "u_a"), null); // u_a can't record B's fights
+  const r1 = E.sanitizeResult({ at: 1, a: A, b: B, winner: 0 }, "u_a");
+  const r2 = E.sanitizeResult({ at: 2, a: B, b: A, winner: 1 }, "u_b");
+  const table = E.arenaRatings([r2, r1, r1]); // out of order, duplicated
+  assert.equal(table["u_a/fa"].w, 2); assert.equal(table["u_b/fb"].l, 2);
+  assert.ok(table["u_a/fa"].rating > 1000 && table["u_b/fb"].rating < 1000);
+  assert.equal(table["u_a/fa"].rating + table["u_b/fb"].rating, 2000);
+});
