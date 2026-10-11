@@ -71,6 +71,16 @@ Each match plays out as an animated battle. The two agents appear as pixel creat
 
 The creatures, move names and art are original to this project. The page only borrows the familiar layout of a handheld battle screen.
 
+## Fighter Lab (design and train fighters)
+
+`apps/fighter-lab/` is a browser game built on top of the battle viewer. Design a fighter (look, personality and 4 moves), train it in a gym, and watch it battle. It runs entirely in the browser and is published as a claude.ai Artifact. Fighters save to the player's private storage there, or to the browser when that isn't available.
+
+- **Rules:** four styles, each beating the next: Aggro → Social → Mind → Guard → Aggro. A super-effective hit does ×2 damage and a resisted hit ×0.5. Both fighters hit each turn for 12 turns or until one is knocked out.
+- **Getting stronger:** XP raises a fighter's level (more HP and damage, capped at 50). Using a move in training builds mastery (up to +50% damage). Each fighter has a brain, a small reinforcement-learning policy keyed on the battle phase and the opponent's last style, which learns which moves work. Practice partners match your level, so beating them takes strategy; coaches unlock at levels 5, 10 and 20.
+- **aipvp:** the designer shows the `aipvp agent create …` command for a design. Gym training doesn't transfer, because aipvp.io scores matches its own way.
+- Code: `engine.js` (rules, brain, training; no DOM), `sprites.js` (pixel creatures), `index.html` (the app).
+- Tests: `node --test apps/fighter-lab/engine.test.mjs`. These include checks that training measurably raises win rate, and that the brain learns a rotating opponent's pattern.
+
 ## Mock server
 
 `aipvp-mock [--port 8787] [--turn-delay 0.5]`

@@ -1,0 +1,949 @@
+<title>Fighter Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Pixelify+Sans:wght@400;600&family=Silkscreen&display=swap">
+<style>
+/* Layout: app header + tab bar, one panel per tab. Designer and Gym are two columns on wide
+   screens and stack on phones. The battle screen keeps the handheld look of the battle viewer. */
+:root {
+  --bg: #e9eee8;
+  --panel: #f8faf6;
+  --panel-2: #eef3ec;
+  --fg: #1c2420;
+  --muted: #5a6760;
+  --line: #ccd6ce;
+  --accent: #c8402a;
+  --accent-ink: #ffffff;
+  --good: #2f8f4e;
+  --bezel: #2a3036;
+  --bezel-edge: #3b434b;
+  --chip-bg: #dfe7dd;
+  --font-display: "Pixelify Sans", "Silkscreen", ui-monospace, Menlo, monospace;
+  --font-label: "Silkscreen", "Pixelify Sans", ui-monospace, Menlo, monospace;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* battlefield: fixed in both themes */
+  --sky-top: #a9d8ee; --sky-low: #e4f3dc; --grass: #9ccb6e; --grass-dark: #7fb153;
+  --pad: #86b95a; --pad-rim: #5f9140;
+  --hud-bg: #fbfbf2; --hud-ink: #232a2e; --hud-edge: #3d4a52;
+  --hp-good: #3fb35c; --hp-mid: #e2b628; --hp-low: #d8452f; --hp-track: #4a5258;
+  /* style colors (labels always sit beside them) */
+  --st-aggro: #c8402a; --st-social: #c2457e; --st-mind: #1d8079; --st-guard: #56677a;
+  --spd: 1;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111513; --panel: #181e1b; --panel-2: #1e2622; --fg: #e4eae6; --muted: #93a199; --line: #2b3530;
+    --accent: #ee6a4f; --accent-ink: #1a0f0c; --good: #5fc17d; --bezel: #0a0c0e; --bezel-edge: #2b3238; --chip-bg: #26302b;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111513; --panel: #181e1b; --panel-2: #1e2622; --fg: #e4eae6; --muted: #93a199; --line: #2b3530;
+  --accent: #ee6a4f; --accent-ink: #1a0f0c; --good: #5fc17d; --bezel: #0a0c0e; --bezel-edge: #2b3238; --chip-bg: #26302b;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
+button, input, select { font: inherit; color: inherit; }
+.wrap { max-width: 980px; margin: 0 auto; padding-inline: 16px; padding-block: 16px 48px; display: grid; gap: 16px; }
+
+/* header */
+.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 8px 16px; }
+.brand h1 { margin: 0; font-family: var(--font-display); font-weight: 600; font-size: clamp(26px, 6vw, 36px); line-height: 1.1; }
+.brand p { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+.store { font-family: var(--font-label); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+  display: inline-flex; align-items: center; gap: 6px; }
+.store::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.store.db::before { background: var(--good); }
+
+/* tabs */
+.tabs { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 4px; padding: 4px; background: var(--bezel); border-radius: 12px; }
+.tab { appearance: none; border: 0; background: transparent; color: #c9d2cc; padding: 10px 4px; border-radius: 9px; cursor: pointer;
+  font-family: var(--font-label); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; }
+.tab[aria-selected="true"] { background: var(--accent); color: #fff; }
+.tab:focus-visible, .btn:focus-visible, .seg button:focus-visible, .card:focus-visible, .skill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* active fighter bar */
+.active { display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; min-width: 0; }
+.active canvas { width: 48px; height: 48px; image-rendering: pixelated; flex: none; }
+.active .who { min-width: 0; flex: 1; display: grid; gap: 4px; }
+.active .name { font-family: var(--font-display); font-weight: 600; font-size: 18px; line-height: 1.1; overflow-wrap: anywhere; }
+.lv { font-family: var(--font-label); font-size: 11px; color: var(--muted); letter-spacing: 0.04em; font-variant-numeric: tabular-nums; }
+.xpbar { height: 6px; background: var(--chip-bg); border-radius: 99px; overflow: hidden; }
+.xpbar span { display: block; height: 100%; background: var(--accent); border-radius: 99px; transition: width 600ms ease; }
+
+/* generic */
+.panel { display: grid; gap: 16px; }
+.box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; display: grid; gap: 12px; min-width: 0; }
+.box h2 { margin: 0; font-family: var(--font-label); font-size: 12px; font-weight: 400; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.box h3 { margin: 0; font-family: var(--font-display); font-weight: 600; font-size: 20px; line-height: 1.2; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.btn { appearance: none; border: 1px solid var(--line); background: var(--panel-2); padding: 9px 14px; border-radius: 999px; cursor: pointer;
+  font-family: var(--font-label); font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase; min-height: 40px; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: transparent; color: #fff; }
+.btn.danger { color: var(--accent); }
+.btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+.two { display: grid; gap: 16px; grid-template-columns: 1fr; }
+@media (min-width: 760px) { .two { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); align-items: start; } }
+
+/* roster */
+.cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.card { appearance: none; text-align: left; border: 1px solid var(--line); background: var(--panel); border-radius: 12px; padding: 12px;
+  display: grid; gap: 6px; cursor: pointer; min-width: 0; }
+.card[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.card canvas { width: 72px; height: 72px; image-rendering: pixelated; }
+.card .name { font-family: var(--font-display); font-weight: 600; font-size: 17px; line-height: 1.15; overflow-wrap: anywhere; }
+.card.new { place-content: center; justify-items: center; text-align: center; border-style: dashed; color: var(--muted); min-height: 150px; }
+.card.new b { font-family: var(--font-display); font-size: 34px; line-height: 1; color: var(--accent); }
+.card.locked { cursor: not-allowed; opacity: 0.55; }
+
+/* designer */
+.stage { position: relative; aspect-ratio: 4 / 3; max-width: 100%; border-radius: 10px; overflow: hidden;
+  background: linear-gradient(to bottom, var(--sky-top), var(--sky-low) 58%, var(--grass) 58.2%); }
+.stage .pad { position: absolute; left: 22%; right: 22%; top: 70%; height: 14%; border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 40%, var(--pad) 55%, var(--pad-rim) 72%, transparent 73%); }
+.stage canvas { position: absolute; left: 30%; width: 40%; top: 22%; image-rendering: pixelated; animation: idle 1.6s ease-in-out infinite; }
+@keyframes idle { 50% { transform: translateY(-3%); } }
+.field { display: grid; gap: 6px; }
+.field > label, .field > .lab { font-family: var(--font-label); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.field input[type="text"] { width: 100%; border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 10px 12px;
+  font-family: var(--font-display); font-size: 18px; text-transform: uppercase; }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+.hue { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: center; }
+.swatch { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--line); }
+.seg { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 3px; background: var(--chip-bg); border-radius: 10px; }
+.seg button { appearance: none; border: 0; background: transparent; padding: 7px 11px; border-radius: 8px; cursor: pointer; font-size: 13px; min-height: 34px; }
+.seg button[aria-pressed="true"] { background: var(--panel); box-shadow: 0 1px 2px rgba(0,0,0,0.15); font-weight: 600; }
+.grid2 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.trait { display: grid; gap: 2px; }
+.trait .top-line { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
+.trait .top-line b { font-variant-numeric: tabular-nums; font-weight: 500; }
+.styles { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.style-col { display: grid; gap: 6px; align-content: start; }
+.style-head { display: flex; align-items: center; gap: 6px; font-family: var(--font-label); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+.dot { width: 10px; height: 10px; border-radius: 3px; background: var(--c); flex: none; }
+.skill { appearance: none; display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; text-align: left;
+  border: 1px solid var(--line); background: var(--bg); border-radius: 8px; padding: 8px 10px; cursor: pointer; min-height: 40px; }
+.skill[aria-pressed="true"] { border-color: var(--c); box-shadow: inset 4px 0 0 var(--c); background: var(--panel); }
+.skill .mv { font-family: var(--font-label); font-size: 11px; letter-spacing: 0.04em; }
+.skill .pw { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.note { font-size: 13px; color: var(--muted); }
+.warn { font-size: 13px; color: var(--accent); }
+.code { display: flex; gap: 8px; align-items: stretch; min-width: 0; }
+.code pre { margin: 0; flex: 1; min-width: 0; overflow-x: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; font-size: 12px; font-family: ui-monospace, Menlo, monospace; white-space: pre; }
+
+/* gym */
+.partners { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+.partners .card { padding: 10px; grid-template-columns: 44px 1fr; align-items: center; column-gap: 8px; }
+.partners .card canvas { width: 44px; height: 44px; grid-row: span 2; }
+.partners .card .name { font-size: 14px; }
+.report-head { font-family: var(--font-display); font-size: 22px; font-weight: 600; line-height: 1.2; }
+.badge { display: inline-block; font-family: var(--font-label); font-size: 11px; letter-spacing: 0.05em; padding: 3px 8px; border-radius: 6px;
+  background: var(--accent); color: #fff; }
+.mastery { display: grid; gap: 8px; }
+.mrow { display: grid; grid-template-columns: 92px 1fr 56px; gap: 10px; align-items: center; font-size: 13px; }
+.mrow .mv { font-family: var(--font-label); font-size: 11px; }
+.mtrack { height: 8px; background: var(--chip-bg); border-radius: 99px; position: relative; overflow: hidden; }
+.mtrack .was { position: absolute; inset: 0 auto 0 0; background: var(--c); opacity: 0.45; border-radius: 99px; }
+.mtrack .now { position: absolute; inset: 0 auto 0 0; background: var(--c); border-radius: 99px; transition: width 700ms ease; }
+.mrow .val { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.stat { background: var(--panel-2); border-radius: 10px; padding: 10px; display: grid; gap: 2px; }
+.stat b { font-family: var(--font-display); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.stat span { font-size: 12px; color: var(--muted); }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart .tip { position: absolute; pointer-events: none; background: var(--fg); color: var(--bg); font-size: 12px; padding: 6px 8px; border-radius: 6px;
+  transform: translate(-50%, -110%); white-space: nowrap; }
+.brain { display: grid; gap: 6px; }
+.brow { display: grid; grid-template-columns: minmax(0, 9em) minmax(0, 1fr); gap: 10px; align-items: center; font-size: 13px; }
+.brow .ctx { color: var(--muted); }
+.brow .ans { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; min-width: 0; }
+.chip { font-family: var(--font-label); font-size: 10px; letter-spacing: 0.04em; color: #fff; background: var(--c, #666); padding: 3px 7px; border-radius: 4px; white-space: nowrap; }
+.conf { height: 6px; background: var(--chip-bg); border-radius: 99px; overflow: hidden; }
+.conf span { display: block; height: 100%; background: var(--c); border-radius: 99px; }
+.pct { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; min-width: 3em; text-align: right; }
+
+/* battle */
+.console { background: var(--bezel); border: 1px solid var(--bezel-edge); border-radius: 14px 14px 28px 14px; padding: 12px; display: grid; gap: 10px; }
+.scene { position: relative; aspect-ratio: 3 / 2; max-width: 100%; overflow: hidden; border-radius: 6px; container-type: inline-size;
+  background: linear-gradient(to bottom, var(--sky-top) 0%, var(--sky-low) 42%, var(--grass) 42.2%, var(--grass) 100%); isolation: isolate; }
+.scene::after { content: ""; position: absolute; inset: 42% 0 0 0; z-index: -1; opacity: 0.35;
+  background: repeating-linear-gradient(to bottom, transparent 0 9px, var(--grass-dark) 9px 11px); }
+.scene.shake { animation: shake calc(380ms / var(--spd)) linear; }
+.scene .pad { position: absolute; border-radius: 50%; background: radial-gradient(ellipse at 50% 40%, var(--pad) 55%, var(--pad-rim) 72%, transparent 73%); }
+.scene .pad.foe { left: 56%; top: 33%; width: 38%; height: 13%; }
+.scene .pad.player { left: 2%; top: 80%; width: 44%; height: 15%; }
+.mon { position: absolute; image-rendering: pixelated; aspect-ratio: 1; transition: transform calc(300ms / var(--spd)), opacity calc(300ms / var(--spd)); }
+.mon.foe { left: 64%; top: 3%; width: 23%; }
+.mon.player { left: 9%; top: 42%; width: 30%; }
+.mon.lunge-player { animation: lunge-player calc(420ms / var(--spd)) ease-out; }
+.mon.lunge-foe { animation: lunge-foe calc(420ms / var(--spd)) ease-out; }
+.mon.hit { animation: hit calc(480ms / var(--spd)) steps(1, end); }
+.mon.blink { animation: blink calc(520ms / var(--spd)) steps(1, end); }
+.mon.rise { animation: rise calc(500ms / var(--spd)) ease-in-out; }
+.mon.faint { transform: translateY(45%); opacity: 0; transition-duration: calc(900ms / var(--spd)); }
+.hud { position: absolute; width: 46%; background: var(--hud-bg); color: var(--hud-ink); border: 2px solid var(--hud-edge); border-radius: 4px 10px 4px 10px;
+  padding: 1.6cqw 2.2cqw; display: grid; gap: 0.8cqw; font-family: var(--font-display); font-size: clamp(10px, 3.1cqw, 18px); line-height: 1.1;
+  box-shadow: 3px 3px 0 rgba(35, 42, 46, 0.25); }
+.hud.foe { left: 4%; top: 6%; }
+.hud.player { right: 4%; top: 56%; }
+.hud-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1.5cqw; min-width: 0; }
+.hud-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.hud-lv { font-family: var(--font-label); font-size: 0.72em; white-space: nowrap; }
+.hp { display: flex; align-items: center; gap: 1.2cqw; }
+.hp-label { font-family: var(--font-label); font-size: 0.68em; color: #b7522a; }
+.hp-track { display: block; flex: 1; height: 1.5cqw; min-height: 5px; background: var(--hp-track); border-radius: 99px; padding: 1px; overflow: hidden; }
+.hp-fill { display: block; height: 100%; width: 100%; border-radius: 99px; background: var(--hp-good); transition: width calc(700ms / var(--spd)) ease-out; }
+.hp-fill.mid { background: var(--hp-mid); } .hp-fill.low { background: var(--hp-low); }
+.hp-num { text-align: right; font-variant-numeric: tabular-nums; font-size: 0.9em; }
+.banner { position: absolute; left: 0; right: 0; top: 38%; padding: 1.4cqw 0; text-align: center; font-family: var(--font-display); font-weight: 600;
+  font-size: clamp(14px, 5cqw, 30px); letter-spacing: 0.06em; color: #fffdf3; background: rgba(28, 33, 38, 0.82); opacity: 0; transform: scaleY(0); pointer-events: none; }
+.banner.show { animation: banner calc(1500ms / var(--spd)) ease-in-out; }
+.banner.stay { opacity: 1; transform: none; }
+.fx { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.textbox { position: relative; background: var(--hud-bg); color: var(--hud-ink); border: 3px double var(--hud-edge); border-radius: 6px; padding: 12px 16px;
+  min-height: 4.2em; font-family: var(--font-display); font-size: clamp(15px, 3.6vw, 20px); line-height: 1.35; }
+.textbox p { margin: 0; overflow-wrap: anywhere; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.controls .btn { background: #3a424a; border-color: var(--bezel-edge); color: #f1f4f2; }
+.controls .btn.primary { background: var(--accent); color: #fff; }
+.readout { margin-left: auto; font-family: var(--font-label); font-size: 11px; letter-spacing: 0.06em; color: #c9d2cc; text-transform: uppercase; font-variant-numeric: tabular-nums; }
+.log { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow-y: auto; border-top: 1px solid var(--line); }
+.log li { display: grid; grid-template-columns: 3em auto 1fr auto; gap: 2px 10px; align-items: baseline; padding: 7px 2px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.log .t, .log .pts { font-family: var(--font-label); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.log .eff { grid-column: 3 / -1; font-size: 12px; color: var(--muted); }
+.log .who { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.toast { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--fg); color: var(--bg);
+  padding: 10px 14px; border-radius: 10px; font-size: 14px; z-index: 20; max-width: calc(100% - 32px); }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@keyframes shake { 0%,100% { transform: translate(0,0); } 20% { transform: translate(-4px,2px); } 40% { transform: translate(4px,-2px); } 60% { transform: translate(-3px,-1px); } 80% { transform: translate(3px,1px); } }
+@keyframes lunge-player { 40% { transform: translate(18%, -12%); } }
+@keyframes lunge-foe { 40% { transform: translate(-18%, 12%); } }
+@keyframes hit { 0%,40%,80% { opacity: 0.15; } 20%,60%,100% { opacity: 1; } }
+@keyframes blink { 0%,50% { opacity: 0.25; } 25%,75% { opacity: 0.9; } 100% { opacity: 1; } }
+@keyframes rise { 50% { transform: translateY(-8%); } }
+@keyframes banner { 0% { opacity: 0; transform: scaleY(0); } 15%,80% { opacity: 1; transform: scaleY(1); } 100% { opacity: 0; transform: scaleY(0); } }
+@media (prefers-reduced-motion: reduce) {
+  .stage canvas, .scene.shake, .mon.lunge-player, .mon.lunge-foe, .mon.rise { animation: none; }
+}
+@media (max-width: 460px) { .readout { margin-left: 0; width: 100%; } .stats b { font-size: 19px; } }
+</style>
+
+<main class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1>Fighter Lab</h1>
+      <p>Design fighters, train them in the gym, and watch them battle.</p>
+    </div>
+    <span class="store" id="store">Connecting…</span>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab" role="tab" id="tab-roster" data-tab="roster">Roster</button>
+    <button class="tab" role="tab" id="tab-design" data-tab="design">Design</button>
+    <button class="tab" role="tab" id="tab-gym" data-tab="gym">Gym</button>
+    <button class="tab" role="tab" id="tab-battle" data-tab="battle">Battle</button>
+  </nav>
+
+  <div id="active-bar"></div>
+  <section id="view" class="panel" aria-live="polite"></section>
+</main>
+<div class="toast" id="toast" hidden></div>
+
+<script src="engine.js"></script>
+<script src="sprites.js"></script>
+<script>
+(() => {
+  "use strict";
+  const E = window.FighterEngine, SP = window.FighterSprites;
+  const $ = (id) => document.getElementById(id);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const STYLE_VAR = { aggro: "var(--st-aggro)", social: "var(--st-social)", mind: "var(--st-mind)", guard: "var(--st-guard)" };
+  const NAMES = ["NOVA", "RIVET", "EMBER", "QUILL", "VOLT", "MOSS", "ONYX", "PIXEL", "TANGO", "ZEPHYR", "BRAMBLE", "COMET"];
+
+  // ---------- state ----------
+  const S = {
+    fighters: [], activeId: null, tab: "design", draft: null, editingId: null,
+    partnerId: "brawler", reps: 10, report: null, busy: false, storage: "loading",
+    battle: { foeId: "brawler", match: null, foe: null, label: "" }, confirmDelete: false,
+  };
+  const active = () => S.fighters.find((f) => f.id === S.activeId) || null;
+
+  // ---------- storage: private per-person database, or this device as a fallback ----------
+  const LOCAL_KEY = "fighterlab.v1";
+  let coll = null;
+  const writing = {};
+  function loadLocal() { try { return JSON.parse(localStorage.getItem(LOCAL_KEY) || "[]"); } catch { return []; } }
+  function saveLocal() { try { localStorage.setItem(LOCAL_KEY, JSON.stringify(S.fighters)); } catch { /* storage blocked */ } }
+  function sortFighters() { S.fighters.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)); }
+  async function persist(f) {
+    const i = S.fighters.findIndex((x) => x.id === f.id);
+    if (i >= 0) S.fighters[i] = f; else S.fighters.push(f);
+    sortFighters();
+    if (!coll) { saveLocal(); return true; }
+    // one write at a time per fighter
+    const prev = writing[f.id] || Promise.resolve();
+    const run = prev.then(() => coll.doc(f.id).set(E.clone(f)));
+    writing[f.id] = run.catch(() => {});
+    try { await run; return true; }
+    catch (e) {
+      toast(e && e.code === "quota_exceeded" ? "Storage is full. Delete a fighter to make room." : "Couldn't save just now. Your change is kept on screen; try again.");
+      return false;
+    }
+  }
+  async function removeFighter(id) {
+    S.fighters = S.fighters.filter((f) => f.id !== id);
+    if (S.activeId === id) S.activeId = S.fighters[0]?.id || null;
+    if (coll) { try { await coll.doc(id).delete(); } catch { toast("Couldn't delete just now. Try again."); } }
+    else saveLocal();
+  }
+  async function connectStorage() {
+    const use = window.claude && window.claude.use;
+    if (!use) { setStorage("local"); return; }
+    try {
+      const [db, user] = await Promise.all([window.claude.use("db"), window.claude.use("user")]);
+      const uid = user ? await user.id() : null;
+      if (!db || !uid) { setStorage("local"); return; }
+      coll = db.collection("data/users/" + uid);
+      const snap = await coll.get();
+      const remote = snap.docs.map((d) => E.clone(d.data()));
+      // fighters made on this device before storage connected move into the account
+      for (const f of S.fighters) {
+        if (!remote.some((r) => r.id === f.id)) { await coll.doc(f.id).set(E.clone(f)); remote.push(f); }
+      }
+      try { localStorage.removeItem(LOCAL_KEY); } catch { /* ignore */ }
+      S.fighters = remote; sortFighters();
+      if (!active()) S.activeId = S.fighters[0]?.id || null;
+      setStorage("db");
+      if (S.fighters.length && S.tab === "design" && !S.editingId) { S.tab = "roster"; }
+      render();
+      coll.onSnapshot((qs) => {
+        if (S.busy) return;
+        const next = qs.docs.map((d) => E.clone(d.data()));
+        if (JSON.stringify(next.map((f) => [f.id, f.xp, f.name, f.moves])) === JSON.stringify(S.fighters.map((f) => [f.id, f.xp, f.name, f.moves]))) return;
+        S.fighters = next; sortFighters();
+        if (!active()) S.activeId = S.fighters[0]?.id || null;
+        if (S.tab !== "design" && S.tab !== "battle") render(); else renderActiveBar();
+      }, () => {});
+    } catch {
+      coll = null; setStorage("local");
+    }
+  }
+  function setStorage(mode) {
+    S.storage = mode;
+    const el = $("store");
+    el.className = "store" + (mode === "db" ? " db" : "");
+    el.textContent = mode === "db" ? "Saved to your account" : mode === "local" ? "Saved on this device only" : "Connecting…";
+  }
+
+  // ---------- toasts ----------
+  let toastTimer = 0;
+  function toast(msg) {
+    const t = $("toast"); t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 3200);
+  }
+
+  // ---------- sprites ----------
+  function paintSprites(root) {
+    for (const c of root.querySelectorAll("canvas[data-sprite]")) {
+      const key = c.dataset.sprite;
+      let who = null;
+      if (key === "draft") who = { id: S.editingId || "draft-" + (S.draft?.name || ""), design: S.draft.design };
+      else if (key.startsWith("p:")) who = partnerLook(key.slice(2));
+      else who = S.fighters.find((f) => f.id === key);
+      if (who) SP.draw(c, who, { back: c.hasAttribute("data-back") });
+    }
+  }
+  function partnerLook(id) {
+    const p = E.PARTNERS.find((x) => x.id === id), me = active();
+    if (p.kind === "mirror") return me ? { id: "mirror", design: { ...me.design, hue: (me.design.hue + 180) % 360 } } : { id: "mirror", design: {} };
+    return { id: p.id, design: p.design };
+  }
+
+  // ---------- active fighter bar ----------
+  function levelProgress(f) {
+    if (f.level >= E.MAX_LEVEL) return 1;
+    const a = E.xpForLevel(f.level), b = E.xpForLevel(f.level + 1);
+    return (f.xp - a) / (b - a);
+  }
+  function renderActiveBar() {
+    const f = active(), bar = $("active-bar");
+    if (!f) { bar.innerHTML = ""; return; }
+    const next = f.level >= E.MAX_LEVEL ? "Max level" : `${E.xpForLevel(f.level + 1) - f.xp} XP to level ${f.level + 1}`;
+    bar.innerHTML = `<div class="active">
+      <canvas data-sprite="${esc(f.id)}" width="28" height="28" aria-hidden="true"></canvas>
+      <div class="who"><span class="name">${esc(f.name)}</span>
+        <span class="lv">LV ${f.level} · ${f.record.w}W ${f.record.l}L ${f.record.d}D · ${next}</span>
+        <span class="xpbar"><span style="width:${Math.round(levelProgress(f) * 100)}%"></span></span></div>
+    </div>`;
+    paintSprites(bar);
+  }
+
+  // ---------- tabs ----------
+  function setTab(tab) {
+    if (S.tab === "battle" && tab !== "battle") stopBattle();
+    S.tab = tab;
+    if (tab === "design" && !S.draft) openDesigner(S.activeId);
+    render();
+  }
+  document.querySelector(".tabs").addEventListener("click", (e) => { const b = e.target.closest(".tab"); if (b) setTab(b.dataset.tab); });
+
+  function render() {
+    for (const t of document.querySelectorAll(".tab")) t.setAttribute("aria-selected", String(t.dataset.tab === S.tab));
+    renderActiveBar();
+    const v = $("view");
+    if (S.tab === "roster") renderRoster(v);
+    else if (S.tab === "design") renderDesigner(v);
+    else if (S.tab === "gym") renderGym(v);
+    else renderBattle(v);
+  }
+
+  // ---------- roster ----------
+  function renderRoster(v) {
+    const cards = S.fighters.map((f) => `<button class="card" data-pick="${esc(f.id)}" aria-pressed="${f.id === S.activeId}">
+        <canvas data-sprite="${esc(f.id)}" width="28" height="28" aria-hidden="true"></canvas>
+        <span class="name">${esc(f.name)}</span>
+        <span class="lv">LV ${f.level} · ${f.record.w}-${f.record.l}-${f.record.d}</span>
+        <span class="small muted">${f.moves.map((m) => E.SKILLS[m].move).join(" · ")}</span>
+      </button>`).join("");
+    v.innerHTML = `<div class="box">
+      <h2>Your fighters</h2>
+      ${S.fighters.length ? `<p class="note">Tap a fighter to make it active for the Gym and Battle tabs.</p>` : `<p class="note">No fighters yet. Design your first one.</p>`}
+      <div class="cards">${cards}
+        <button class="card new" data-new><b>+</b><span>New fighter</span></button>
+      </div>
+    </div>`;
+    paintSprites(v);
+    v.onclick = (e) => {
+      const pick = e.target.closest("[data-pick]");
+      if (pick) { S.activeId = pick.dataset.pick; S.report = null; render(); return; }
+      if (e.target.closest("[data-new]")) { openDesigner(null); S.tab = "design"; render(); }
+    };
+  }
+
+  // ---------- designer ----------
+  function randomDesign() {
+    const r = Math.random;
+    return { hue: Math.floor(r() * 360), accent: Math.floor(r() * 360), body: ["round", "tall", "wide"][Math.floor(r() * 3)],
+             size: Math.round((0.35 + r() * 0.55) * 100) / 100, spikes: Math.floor(r() * 4), armor: r() < 0.35,
+             eyes: ["round", "angry", "visor"][Math.floor(r() * 3)], pattern: ["plain", "spots", "stripes"][Math.floor(r() * 3)] };
+  }
+  function openDesigner(id) {
+    const f = id && S.fighters.find((x) => x.id === id);
+    S.editingId = f ? f.id : null;
+    S.confirmDelete = false;
+    S.draft = f ? { name: f.name, design: { ...f.design }, personality: { ...f.personality }, moves: f.moves.slice() }
+      : { name: NAMES[Math.floor(Math.random() * NAMES.length)], design: randomDesign(),
+          personality: { aggression: 0.6, caution: 0.5, creativity: 0.5, loyalty: 0.4 }, moves: ["fight", "talk", "strategize", "shield"] };
+  }
+  const seg = (field, value, options) => `<div class="seg" role="group">${options.map(([v, label]) =>
+    `<button type="button" data-seg="${field}" data-val="${esc(v)}" aria-pressed="${String(v) === String(value)}">${label}</button>`).join("")}</div>`;
+  const TRAIT_HELP = {
+    aggression: "Starts out favoring Aggro moves.", caution: "Starts out favoring Guard moves.",
+    creativity: "Starts out favoring Mind moves.", loyalty: "Starts out favoring Social moves.",
+  };
+  function coverageNote(moves) {
+    const have = new Set(moves.map((m) => E.SKILLS[m].style));
+    const missing = E.STYLES.filter((s) => !have.has(s));
+    if (!missing.length) return `<p class="note">Covers all four styles, so it can learn a counter to anything.</p>`;
+    return `<p class="warn">${missing.map((s) => {
+      const beaten = E.STYLES.find((x) => E.BEATS[s] === x);
+      return `No ${E.STYLE_INFO[s].label} move: nothing to counter ${E.STYLE_INFO[beaten].label}.`;
+    }).join(" ")}</p>`;
+  }
+  function renderDesigner(v) {
+    const d = S.draft, editing = S.editingId && S.fighters.find((f) => f.id === S.editingId);
+    const trained = editing && (editing.xp > 0);
+    const dropped = editing ? editing.moves.filter((m) => !d.moves.includes(m)) : [];
+    const skillBtns = E.STYLES.map((st) => `<div class="style-col" style="--c:${STYLE_VAR[st]}">
+        <div class="style-head"><span class="dot" aria-hidden="true"></span>${E.STYLE_INFO[st].label}</div>
+        <p class="note" style="margin:0">${E.STYLE_INFO[st].blurb}</p>
+        ${E.SKILL_NAMES.filter((s) => E.SKILLS[s].style === st).map((s) => `<button type="button" class="skill" data-skill="${s}" aria-pressed="${d.moves.includes(s)}">
+          <span><span class="mv">${E.SKILLS[s].move}</span> <span class="small muted">${s}</span></span><span class="pw">PWR ${E.SKILLS[s].power}</span></button>`).join("")}
+      </div>`).join("");
+    const preview = editing ? E.redesign(editing, { name: d.name || editing.name, design: d.design, personality: d.personality, ...(d.moves.length === 4 ? { moves: d.moves } : {}) })
+      : (d.moves.length === 4 ? E.createFighter({ ...d, name: d.name || "FIGHTER" }) : null);
+    v.innerHTML = `<div class="two">
+      <div class="box" style="position:sticky; top:calc(env(safe-area-inset-top, 0px) + 60px)">
+        <h2>${editing ? "Edit fighter" : "New fighter"}</h2>
+        <div class="stage"><div class="pad"></div><canvas data-sprite="draft" width="28" height="28" role="img" aria-label="Preview of ${esc(d.name)}"></canvas></div>
+        <div class="row"><button class="btn" type="button" id="randomize">Randomize look</button></div>
+        ${!S.fighters.length ? `<p class="note">This is a starting design. Change anything, then create your fighter.</p>` : ""}
+      </div>
+      <div class="panel">
+        <div class="box">
+          <div class="field"><label for="f-name">Name</label>
+            <input type="text" id="f-name" maxlength="16" value="${esc(d.name)}" autocomplete="off" spellcheck="false"></div>
+        </div>
+        <div class="box">
+          <h2>Look</h2>
+          <div class="grid2">
+            <div class="field"><span class="lab">Color</span><div class="hue"><span class="swatch" style="background:hsl(${d.design.hue} 60% 56%)"></span>
+              <input type="range" id="f-hue" min="0" max="359" value="${d.design.hue}" aria-label="Body color"></div></div>
+            <div class="field"><span class="lab">Accent</span><div class="hue"><span class="swatch" style="background:hsl(${d.design.accent} 70% 58%)"></span>
+              <input type="range" id="f-accent" min="0" max="359" value="${d.design.accent}" aria-label="Accent color"></div></div>
+            <div class="field"><span class="lab">Size</span><input type="range" id="f-size" min="0" max="1" step="0.05" value="${d.design.size}" aria-label="Size"></div>
+            <div class="field"><span class="lab">Body</span>${seg("body", d.design.body, [["round", "Round"], ["tall", "Tall"], ["wide", "Wide"]])}</div>
+            <div class="field"><span class="lab">Spikes</span>${seg("spikes", d.design.spikes, [[0, "None"], [1, "1"], [2, "2"], [3, "3"]])}</div>
+            <div class="field"><span class="lab">Eyes</span>${seg("eyes", d.design.eyes, [["round", "Round"], ["angry", "Fierce"], ["visor", "Visor"]])}</div>
+            <div class="field"><span class="lab">Pattern</span>${seg("pattern", d.design.pattern, [["plain", "Plain"], ["spots", "Spots"], ["stripes", "Stripes"]])}</div>
+            <div class="field"><span class="lab">Armor</span>${seg("armor", d.design.armor, [[false, "Off"], [true, "Plated"]])}</div>
+          </div>
+        </div>
+        <div class="box">
+          <h2>Personality</h2>
+          <p class="note">Sets your fighter's instincts before training. Training then learns what actually works.</p>
+          <div class="grid2">${E.TRAITS.map((t) => `<div class="trait">
+            <div class="top-line"><label for="t-${t}">${t[0].toUpperCase() + t.slice(1)}</label><b id="tv-${t}">${Math.round(d.personality[t] * 100)}</b></div>
+            <input type="range" id="t-${t}" data-trait="${t}" min="0" max="1" step="0.05" value="${d.personality[t]}">
+            <span class="note">${TRAIT_HELP[t]}</span></div>`).join("")}</div>
+        </div>
+        <div class="box">
+          <h2>Moves · ${d.moves.length} of 4 picked</h2>
+          <p class="note">Each style beats the next: Aggro → Social → Mind → Guard → Aggro. Effective hits do double damage, resisted hits half.</p>
+          <div class="styles">${skillBtns}</div>
+          ${d.moves.length === 4 ? coverageNote(d.moves) : `<p class="warn">Pick ${4 - d.moves.length} more.</p>`}
+          ${trained && dropped.length ? `<p class="warn">${dropped.map((m) => E.SKILLS[m].move).join(" and ")} will lose ${dropped.length > 1 ? "their" : "its"} training. Moves you keep stay trained.</p>` : ""}
+        </div>
+        <div class="box">
+          <div class="row">
+            <button class="btn primary" type="button" id="save" ${d.moves.length !== 4 || !d.name.trim() ? "disabled" : ""}>${editing ? "Save changes" : "Create fighter"}</button>
+            ${editing ? (S.confirmDelete
+              ? `<span class="small">Delete ${esc(editing.name)} and all its training?</span><button class="btn danger" type="button" id="del-yes">Delete</button><button class="btn" type="button" id="del-no">Keep</button>`
+              : `<button class="btn danger" type="button" id="del">Delete fighter</button>`) : ""}
+          </div>
+          ${preview ? `<div class="field"><span class="lab">Register this design on aipvp</span>
+            <div class="code"><pre id="cmd">${esc(E.aipvpCommand(preview))}</pre><button class="btn" type="button" id="copy">Copy</button></div>
+            <span class="note">Creates the agent on aipvp with these moves and personality. Gym training stays here; aipvp scores matches its own way.</span></div>` : ""}
+        </div>
+      </div>
+    </div>`;
+    paintSprites(v);
+    bindDesigner(v);
+  }
+  function refreshPreview(v) {
+    const c = v.querySelector('canvas[data-sprite="draft"]');
+    if (c) SP.draw(c, { id: S.editingId || "draft-" + S.draft.name, design: S.draft.design });
+  }
+  function bindDesigner(v) {
+    const d = S.draft;
+    v.onclick = async (e) => {
+      const sg = e.target.closest("[data-seg]");
+      if (sg) {
+        const f = sg.dataset.seg, raw = sg.dataset.val;
+        d.design[f] = f === "spikes" ? +raw : f === "armor" ? raw === "true" : raw;
+        for (const b of sg.parentElement.children) b.setAttribute("aria-pressed", String(b === sg));
+        refreshPreview(v); return;
+      }
+      const sk = e.target.closest("[data-skill]");
+      if (sk) {
+        const s = sk.dataset.skill, i = d.moves.indexOf(s);
+        if (i >= 0) d.moves.splice(i, 1);
+        else if (d.moves.length < 4) d.moves.push(s);
+        else { toast("A fighter has 4 moves. Unpick one first."); return; }
+        renderDesigner(v); return;
+      }
+      if (e.target.id === "randomize") { d.design = randomDesign(); renderDesigner(v); return; }
+      if (e.target.id === "copy") {
+        const text = $("cmd").textContent;
+        try { await navigator.clipboard.writeText(text); toast("Copied."); }
+        catch { const r = document.createRange(); r.selectNodeContents($("cmd")); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); toast("Selected. Copy it from here."); }
+        return;
+      }
+      if (e.target.id === "del") { S.confirmDelete = true; renderDesigner(v); return; }
+      if (e.target.id === "del-no") { S.confirmDelete = false; renderDesigner(v); return; }
+      if (e.target.id === "del-yes") {
+        const name = S.fighters.find((f) => f.id === S.editingId)?.name;
+        await removeFighter(S.editingId);
+        S.draft = null; S.editingId = null; S.tab = "roster"; render(); toast(`${name} deleted.`); return;
+      }
+      if (e.target.id === "save") {
+        const btn = e.target; btn.disabled = true;
+        const name = d.name.trim().toUpperCase();
+        try {
+          const editing = S.editingId && S.fighters.find((f) => f.id === S.editingId);
+          const f = editing ? E.redesign(editing, { name, design: d.design, personality: d.personality, moves: d.moves })
+                            : E.createFighter({ name, design: d.design, personality: d.personality, moves: d.moves });
+          const ok = await persist(f);
+          S.activeId = f.id; S.editingId = f.id; S.draft = null; S.report = null;
+          if (ok) toast(editing ? "Saved." : `${f.name} is ready. Take it to the Gym.`);
+          S.tab = editing ? "roster" : "gym"; render();
+        } catch (err) { toast(err.message); btn.disabled = false; }
+      }
+    };
+    v.oninput = (e) => {
+      const t = e.target;
+      if (t.id === "f-name") { d.name = t.value.toUpperCase().replace(/[^A-Z0-9 '\-]/g, ""); if (t.value !== d.name) t.value = d.name;
+        $("save").disabled = d.moves.length !== 4 || !d.name.trim(); return; }
+      if (t.id === "f-hue" || t.id === "f-accent") { d.design[t.id === "f-hue" ? "hue" : "accent"] = +t.value;
+        t.previousElementSibling.style.background = t.id === "f-hue" ? `hsl(${t.value} 60% 56%)` : `hsl(${t.value} 70% 58%)`; refreshPreview(v); return; }
+      if (t.id === "f-size") { d.design.size = +t.value; refreshPreview(v); return; }
+      if (t.dataset.trait) { d.personality[t.dataset.trait] = +t.value; $("tv-" + t.dataset.trait).textContent = Math.round(t.value * 100); }
+    };
+    v.onchange = (e) => { if (e.target.dataset.trait || e.target.id === "f-name") renderDesignerCommand(); };
+  }
+  function renderDesignerCommand() {
+    const pre = $("cmd"); if (!pre) return;
+    const d = S.draft, editing = S.editingId && S.fighters.find((f) => f.id === S.editingId);
+    if (d.moves.length !== 4) return;
+    const f = editing ? E.redesign(editing, { name: d.name || editing.name, personality: d.personality, moves: d.moves }) : E.createFighter({ ...d, name: d.name || "FIGHTER" });
+    pre.textContent = E.aipvpCommand(f);
+  }
+
+  // ---------- gym ----------
+  function needFighter(v, what) {
+    v.innerHTML = `<div class="box"><h3>No fighter yet</h3><p class="muted">Design a fighter first, then bring it here to ${what}.</p>
+      <div class="row"><button class="btn primary" type="button" data-go-design>Design a fighter</button></div></div>`;
+    v.onclick = (e) => { if (e.target.closest("[data-go-design]")) { openDesigner(null); setTab("design"); } };
+  }
+  function partnerCards(level, selected, attr) {
+    return E.availablePartners(level).map((p) => {
+      const lv = p.kind === "mirror" ? level : p.unlock > 1 ? p.level : Math.max(p.level, level);
+      return `<button type="button" class="card${p.locked ? " locked" : ""}" ${attr}="${p.id}" aria-pressed="${p.id === selected}" ${p.locked ? 'aria-disabled="true"' : ""}
+        title="${esc(p.blurb)}"><canvas data-sprite="p:${p.id}" width="28" height="28" aria-hidden="true"></canvas>
+        <span class="name">${esc(p.name)}</span><span class="lv">${p.locked ? `Unlocks at LV ${p.unlock}` : `LV ${lv}`}</span></button>`;
+    }).join("");
+  }
+  function renderGym(v) {
+    const f = active();
+    if (!f) return needFighter(v, "train");
+    const partner = E.PARTNERS.find((p) => p.id === S.partnerId);
+    const rep = S.report;
+    v.innerHTML = `<div class="two">
+      <div class="panel">
+        <div class="box">
+          <h2>Sparring partner</h2>
+          <div class="partners">${partnerCards(f.level, S.partnerId, "data-partner")}</div>
+          <p class="note">${esc(partner.blurb)}</p>
+          <div class="field"><span class="lab">Rounds</span>${seg("reps", S.reps, [[1, "1"], [10, "10"], [50, "50"]])}</div>
+          <div class="row"><button class="btn primary" type="button" id="train" ${S.busy ? "disabled" : ""}>${S.busy ? "Training…" : `Train ${S.reps} round${S.reps > 1 ? "s" : ""}`}</button></div>
+          <p class="note">Every round teaches ${esc(f.name)}'s brain which moves work, adds XP, and builds mastery in the moves it uses.</p>
+        </div>
+        ${rep ? reportBox(rep, f) : ""}
+      </div>
+      <div class="panel">
+        <div class="box">
+          <h2>Progress</h2>
+          <div class="stats">
+            <div class="stat"><b>${f.level}</b><span>Level</span></div>
+            <div class="stat"><b>${f.record.w + f.record.l + f.record.d}</b><span>Rounds sparred</span></div>
+            <div class="stat"><b>${winPct(f.record)}</b><span>Win rate, all time</span></div>
+          </div>
+          <div class="field"><span class="lab">Win rate per training session</span>${historyChart(f)}</div>
+        </div>
+        <div class="box">
+          <h2>What ${esc(f.name)} has learned</h2>
+          <p class="note">The move its brain now favors in each situation, and how sure it is.</p>
+          ${brainRows(f)}
+        </div>
+      </div>
+    </div>`;
+    paintSprites(v);
+    bindChart(v);
+    v.onclick = async (e) => {
+      const p = e.target.closest("[data-partner]");
+      if (p) { if (p.getAttribute("aria-disabled") === "true") { toast(p.querySelector(".lv").textContent + "."); return; } S.partnerId = p.dataset.partner; renderGym(v); return; }
+      const sg = e.target.closest('[data-seg="reps"]');
+      if (sg) { S.reps = +sg.dataset.val; renderGym(v); return; }
+      if (e.target.id === "train") await doTrain(v);
+      if (e.target.id === "watch-last" && S.report) { S.battle.match = S.report.lastMatch; S.battle.foe = S.report.lastFoe; S.battle.label = "Last training round"; S.battle.autoplay = true; setTab("battle"); }
+    };
+  }
+  function winPct(rec) { const n = rec.w + rec.l + rec.d; return n ? Math.round(((rec.w + rec.d / 2) / n) * 100) + "%" : "–"; }
+  async function doTrain(v) {
+    const f = active(); if (!f || S.busy) return;
+    S.busy = true; renderGym(v);
+    await new Promise((r) => setTimeout(r, 30)); // let "Training…" paint
+    try {
+      const { fighter, report } = E.train(f, S.partnerId, S.reps);
+      report.lastFoe = E.partnerFighter(S.partnerId, f);
+      await persist(fighter);
+      S.report = report;
+    } catch (err) { toast(err.message); }
+    S.busy = false; render();
+    if (S.report && S.report.levelAfter > S.report.levelBefore) toast(`Level up! ${active().name} is now level ${S.report.levelAfter}.`);
+  }
+  function reportBox(r, f) {
+    const p = E.PARTNERS.find((x) => x.id === r.partner);
+    const parts = [`${r.win} win${r.win === 1 ? "" : "s"}`, r.draw ? `${r.draw} draw${r.draw === 1 ? "" : "s"}` : "", `${r.loss} loss${r.loss === 1 ? "" : "es"}`].filter(Boolean);
+    const rows = r.mastery.map((m) => `<div class="mrow" style="--c:${STYLE_VAR[E.SKILLS[m.move].style]}">
+        <span class="mv">${E.SKILLS[m.move].move}</span>
+        <span class="mtrack"><span class="was" style="width:${(m.before / 0.5) * 100}%"></span><span class="now" style="width:${(m.after / 0.5) * 100}%"></span></span>
+        <span class="val">+${Math.round(m.after * 100)}%</span></div>`).join("");
+    return `<div class="box">
+      <h2>Session report · vs ${esc(p.name)}</h2>
+      <div class="report-head">${parts.join(", ")}</div>
+      <div class="row"><span class="badge">+${r.xpGained} XP</span>${r.levelAfter > r.levelBefore ? `<span class="badge">LEVEL ${r.levelBefore} → ${r.levelAfter}</span>` : ""}</div>
+      <div class="field"><span class="lab">Move mastery (bonus damage, max +50%)</span><div class="mastery">${rows}</div></div>
+      <div class="row"><button class="btn" type="button" id="watch-last">Watch the last round</button></div>
+    </div>`;
+  }
+  function brainRows(f) {
+    return `<div class="brain">${E.brainMap(f).map((row) => {
+      const sk = E.SKILLS[row.best], c = STYLE_VAR[sk.style];
+      const ctx = row.vs ? `After their ${E.STYLE_INFO[row.vs].label} move` : "First move";
+      return `<div class="brow" style="--c:${c}"><span class="ctx">${ctx}</span>
+        <span class="ans"><span class="chip">${sk.move}</span><span class="conf"><span style="width:${Math.round(row.confidence * 100)}%"></span></span>
+        <span class="pct">${Math.round(row.confidence * 100)}%</span></span></div>`;
+    }).join("")}</div>`;
+  }
+  function historyChart(f) {
+    const h = (f.history || []).slice(-30);
+    if (!h.length) return `<p class="note">Train a session to start the chart.</p>`;
+    const W = 320, Hh = 120, padL = 30, padB = 18, padT = 6, n = h.length;
+    const bw = Math.min(18, (W - padL - 4) / n - 2);
+    const x = (i) => padL + 2 + i * ((W - padL - 4) / n);
+    const y = (v) => padT + (1 - v) * (Hh - padT - padB);
+    const bars = h.map((s, i) => {
+      const rate = (s.win + s.draw / 2) / s.reps, top = y(rate), base = y(0);
+      const hgt = Math.max(2, base - top);
+      return `<g data-i="${i}"><rect x="${x(i) - 2}" y="${padT}" width="${bw + 4}" height="${base - padT}" fill="transparent"></rect>
+        <rect x="${x(i)}" y="${base - hgt}" width="${bw}" height="${hgt}" rx="3" fill="var(--accent)"></rect></g>`;
+    }).join("");
+    const grid = [0, 0.5, 1].map((v) => `<line x1="${padL}" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)" ${v === 0.5 ? 'stroke-dasharray="3 3"' : ""}></line>
+      <text x="${padL - 6}" y="${y(v) + 3}" text-anchor="end" font-size="9" fill="var(--muted)">${v * 100}%</text>`).join("");
+    const data = esc(JSON.stringify(h.map((s) => ({ p: E.PARTNERS.find((p) => p.id === s.partner)?.name || s.partner, w: s.win, l: s.loss, d: s.draw, n: s.reps, lv: s.level }))));
+    return `<div class="chart" data-points="${data}"><svg viewBox="0 0 ${W} ${Hh}" role="img" aria-label="Win rate for each of the last ${n} training sessions">${grid}${bars}
+      <text x="${padL}" y="${Hh - 4}" font-size="9" fill="var(--muted)">older</text><text x="${W}" y="${Hh - 4}" text-anchor="end" font-size="9" fill="var(--muted)">latest</text></svg>
+      <div class="tip" hidden></div></div>
+      <table class="sr-only"><caption>Training sessions</caption><tr><th>Partner</th><th>Rounds</th><th>Wins</th><th>Losses</th><th>Draws</th></tr>
+      ${h.map((s) => `<tr><td>${esc(s.partner)}</td><td>${s.reps}</td><td>${s.win}</td><td>${s.loss}</td><td>${s.draw}</td></tr>`).join("")}</table>`;
+  }
+  function bindChart(v) {
+    const chart = v.querySelector(".chart"); if (!chart) return;
+    const pts = JSON.parse(chart.dataset.points), tip = chart.querySelector(".tip"), svg = chart.querySelector("svg");
+    const show = (g) => {
+      const i = +g.dataset.i, p = pts[i], r = g.querySelector("rect:last-child").getBoundingClientRect(), c = chart.getBoundingClientRect();
+      tip.textContent = `vs ${p.p} · ${p.w}W ${p.l}L ${p.d}D of ${p.n} · LV ${p.lv}`;
+      tip.style.left = r.left - c.left + r.width / 2 + "px"; tip.style.top = r.top - c.top + "px"; tip.hidden = false;
+    };
+    svg.addEventListener("pointerover", (e) => { const g = e.target.closest("g[data-i]"); if (g) show(g); });
+    svg.addEventListener("click", (e) => { const g = e.target.closest("g[data-i]"); if (g) show(g); });
+    svg.addEventListener("pointerleave", () => (tip.hidden = true));
+  }
+
+  // ---------- battle ----------
+  const B = { run: 0, paused: false, waiters: [], speed: 1, parts: [], hp: {}, finished: false };
+  class Cancel extends Error {}
+  function stopBattle() { B.run++; B.paused = false; B.waiters.splice(0).forEach((f) => f()); B.parts = []; }
+  function renderBattle(v) {
+    const f = active();
+    if (!f) return needFighter(v, "battle");
+    v.innerHTML = `<div class="box">
+        <h2>Opponent</h2>
+        <div class="partners">${partnerCards(f.level, S.battle.foeId, "data-foe")}</div>
+        <div class="row"><button class="btn primary" type="button" id="fight">Fight!</button>
+          <span class="note">Exhibition matches don't change your fighter. Train in the Gym to get stronger.</span></div>
+      </div>
+      <div class="console">
+        <div class="scene" id="scene">
+          <div class="pad foe"></div><div class="pad player"></div>
+          <canvas class="mon foe" id="mon-foe" width="28" height="28" role="img" aria-label="Opponent"></canvas>
+          <canvas class="mon player" id="mon-player" width="28" height="28" role="img" aria-label="${esc(f.name)}"></canvas>
+          <div class="hud foe"><div class="hud-row"><span class="hud-name" id="name-foe">???</span><span class="hud-lv" id="lv-foe"></span></div>
+            <div class="hp"><span class="hp-label">HP</span><span class="hp-track"><span class="hp-fill" id="hp-foe"></span></span></div></div>
+          <div class="hud player"><div class="hud-row"><span class="hud-name" id="name-player">${esc(f.name)}</span><span class="hud-lv" id="lv-player">LV ${f.level}</span></div>
+            <div class="hp"><span class="hp-label">HP</span><span class="hp-track"><span class="hp-fill" id="hp-player"></span></span></div>
+            <div class="hp-num" id="hpnum-player"></div></div>
+          <div class="banner" id="banner"></div>
+          <canvas class="fx" id="fx"></canvas>
+        </div>
+        <div class="textbox"><p id="text">Pick an opponent and press Fight!</p></div>
+        <div class="sr-only" aria-live="polite" id="announce"></div>
+        <div class="controls">
+          <button class="btn primary" type="button" id="b-play" disabled>Pause</button>
+          <button class="btn" type="button" id="b-speed">${B.speed}×</button>
+          <span class="readout" id="readout">${esc(S.battle.label || "Ready")}</span>
+        </div>
+      </div>
+      <div class="box"><h2>Battle log</h2><ol class="log" id="log"></ol></div>`;
+    paintSprites(v);
+    SP.draw($("mon-player"), f, { back: true });
+    setupFx();
+    v.onclick = (e) => {
+      const p = e.target.closest("[data-foe]");
+      if (p) { if (p.getAttribute("aria-disabled") === "true") { toast(p.querySelector(".lv").textContent + "."); return; }
+        S.battle.foeId = p.dataset.foe; for (const c of v.querySelectorAll("[data-foe]")) c.setAttribute("aria-pressed", String(c === p)); return; }
+      if (e.target.id === "fight") {
+        const { foe, match } = E.exhibition(active(), S.battle.foeId);
+        S.battle.match = match; S.battle.foe = foe; S.battle.label = "Exhibition";
+        startBattle();
+      }
+      if (e.target.id === "b-play") {
+        if (B.finished) { startBattle(); return; }
+        B.paused = !B.paused; e.target.textContent = B.paused ? "Play" : "Pause";
+        if (!B.paused) B.waiters.splice(0).forEach((fn) => fn());
+      }
+      if (e.target.id === "b-speed") {
+        B.speed = B.speed === 1 ? 2 : B.speed === 2 ? 4 : 1;
+        document.documentElement.style.setProperty("--spd", B.speed); e.target.textContent = B.speed + "×";
+      }
+    };
+    if (S.battle.autoplay && S.battle.match) { S.battle.autoplay = false; startBattle(); }
+  }
+
+  async function gate(run) {
+    while (B.paused) await new Promise((res) => B.waiters.push(res));
+    if (run !== B.run) throw new Cancel();
+  }
+  async function sleep(ms) { const run = B.run; await gate(run); await new Promise((r) => setTimeout(r, ms / B.speed)); await gate(run); }
+  function retrigger(el, cls, ms) { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); setTimeout(() => el.classList.remove(cls), ms / B.speed + 50); }
+  async function say(text, hold = 650) {
+    const el = $("text"); if (!el) throw new Cancel();
+    $("announce").textContent = text;
+    if (reduce) el.textContent = text;
+    else for (let i = 1; i <= text.length; i++) { el.textContent = text.slice(0, i); await sleep(18); }
+    await sleep(hold);
+  }
+  function setHp(side, hp, max) {
+    const pct = Math.max(0, Math.min(100, (hp / max) * 100)), fill = $("hp-" + side);
+    fill.style.width = pct + "%";
+    fill.classList.toggle("mid", pct <= 50 && pct > 20); fill.classList.toggle("low", pct <= 20);
+    if (side === "player") $("hpnum-player").textContent = `${Math.ceil(hp)} / ${max}`;
+  }
+  function logLine(turn, a, side) {
+    const sk = E.SKILLS[a.skill] || { move: a.skill, style: "aggro" };
+    const li = document.createElement("li");
+    const eff = a.effect === "super" ? "Super effective" : a.effect === "resisted" ? "Resisted" : "";
+    li.innerHTML = `<span class="t">T${String(turn).padStart(2, "0")}</span><span class="chip" style="--c:${STYLE_VAR[sk.style]}">${sk.move}</span>
+      <span class="who">${esc(a.agent_name)}</span><span class="pts">−${a.points.toFixed(1)} HP</span>${eff ? `<span class="eff">${eff}</span>` : ""}`;
+    const ol = $("log"); const atEnd = ol.scrollHeight - ol.scrollTop - ol.clientHeight < 40;
+    ol.append(li); if (atEnd) ol.scrollTop = ol.scrollHeight;
+  }
+
+  // particles
+  let fx, fctx;
+  function setupFx() {
+    fx = $("fx"); fctx = fx.getContext("2d");
+    const r = $("scene").getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    fx.width = Math.round(r.width * dpr); fx.height = Math.round(r.height * dpr); fctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener("resize", () => { if ($("fx")) setupFx(); });
+  function center(el) { const s = $("scene").getBoundingClientRect(), r = el.getBoundingClientRect(); return { x: r.left - s.left + r.width / 2, y: r.top - s.top + r.height / 2, w: r.width }; }
+  function spawn(kind, from, to, color) {
+    const n = reduce ? 0.35 : 1, R = Math.random, W = to.w;
+    const add = (p) => B.parts.push(Object.assign({ age: 0, delay: 0, g: 0, size: 3, color }, p));
+    const k = (c) => Math.max(2, Math.round(c * n));
+    if (kind === "burst") for (let i = 0; i < k(22); i++) { const a = R() * 6.283, s = 1.5 + R() * 3.5;
+      add({ x: to.x, y: to.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 1, g: 0.09, life: 30 + R() * 20, size: 3 + R() * 4, color: [color, "#ffd45c", "#ffffff"][i % 3] }); }
+    else if (kind === "ghost") for (let i = 0; i < k(16); i++) add({ x: to.x + (R() - 0.5) * W, y: to.y + (R() - 0.3) * W * 0.6, vx: (R() - 0.5) * 0.6, vy: -0.6 - R(), life: 45, size: 4, delay: i * 2 });
+    else if (kind === "bubbles" || kind === "coins") for (let i = 0; i < k(8); i++) { const fr = 38;
+      add({ x: from.x, y: from.y - from.w * 0.15, vx: (to.x - from.x) / fr, vy: (to.y - from.y) / fr + (kind === "coins" ? -3 : 0), g: kind === "coins" ? 6 / fr : 0,
+            life: fr, delay: i * 4, shape: kind === "coins" ? "sq" : "ring", size: kind === "coins" ? 4 : 5 + R() * 4, wob: R() * 6, color: kind === "coins" ? "#e8b923" : color }); }
+    else if (kind === "glyphs") for (let i = 0; i < k(18); i++) add({ x: to.x + (R() - 0.5) * W, y: to.y - W * 0.6, vx: 0, vy: 1.6 + R() * 1.4, life: 36, delay: i * 2, shape: "text", text: "01{}<>/;="[Math.floor(R() * 9)], size: 11 + R() * 5 });
+    else if (kind === "scan") { add({ x: to.x - W * 0.6, y: to.y, vx: (W * 1.2) / 30, vy: 0, life: 30, shape: "line", size: W * 0.9 });
+      add({ x: to.x + W * 0.6, y: to.y, vx: -(W * 1.2) / 30, vy: 0, life: 30, shape: "line", size: W * 0.9, delay: 30 }); }
+    else if (kind === "barrier") for (let i = 0; i < 3; i++) add({ x: from.x, y: from.y, vx: 0, vy: 0, life: 34, delay: i * 9, shape: "hex", size: from.w * 0.45, grow: from.w * 0.012 });
+    else if (kind === "sparkle") for (let i = 0; i < k(10); i++) { const a = (i / 10) * 6.283;
+      add({ x: from.x + Math.cos(a) * from.w * 0.5, y: from.y + Math.sin(a) * from.w * 0.4, vx: (to.x - from.x) / 40, vy: (to.y - from.y) / 40, life: 40, delay: 8 + i * 2, shape: "star", size: 5, color: "#fff4b0" }); }
+  }
+  function drawPart(p) {
+    fctx.globalAlpha = Math.max(0, 1 - p.age / p.life); fctx.fillStyle = p.color; fctx.strokeStyle = p.color;
+    if (p.shape === "ring") { fctx.lineWidth = 2; fctx.beginPath(); fctx.arc(p.x + Math.sin((p.age + p.wob) / 4) * 4, p.y, p.size, 0, 6.283); fctx.stroke(); }
+    else if (p.shape === "text") { fctx.font = `600 ${p.size}px ui-monospace, Menlo, monospace`; fctx.fillText(p.text, p.x, p.y); }
+    else if (p.shape === "line") { fctx.globalAlpha = 0.85; fctx.fillRect(p.x - 1.5, p.y - p.size / 2, 3, p.size); fctx.globalAlpha = 0.18; fctx.fillRect(p.x - 10, p.y - p.size / 2, 20, p.size); }
+    else if (p.shape === "hex") { const r = p.size + p.age * p.grow; fctx.lineWidth = 3; fctx.beginPath();
+      for (let i = 0; i <= 6; i++) { const a = Math.PI / 6 + (i * Math.PI) / 3; fctx[i ? "lineTo" : "moveTo"](p.x + Math.cos(a) * r, p.y + Math.sin(a) * r * 0.9); } fctx.stroke(); }
+    else if (p.shape === "star") { fctx.fillRect(p.x - p.size, p.y - 0.75, p.size * 2, 1.5); fctx.fillRect(p.x - 0.75, p.y - p.size, 1.5, p.size * 2); }
+    else fctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  let lastTs = 0;
+  function tick(ts) {
+    const steps = B.paused ? 0 : Math.min(4, Math.max(1, Math.round(((ts - lastTs) / 16.7) * B.speed)));
+    lastTs = ts;
+    if (B.parts.length && fctx && $("fx")) {
+      for (let s = 0; s < steps; s++) { for (const p of B.parts) { if (p.delay > 0) { p.delay--; continue; } p.age++; p.x += p.vx; p.y += p.vy; p.vy += p.g; }
+        B.parts = B.parts.filter((p) => p.age < p.life); }
+      const r = $("scene").getBoundingClientRect(); fctx.clearRect(0, 0, r.width, r.height);
+      for (const p of B.parts) if (p.delay <= 0) drawPart(p);
+      fctx.globalAlpha = 1;
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  async function startBattle() {
+    stopBattle();
+    B.finished = false;
+    const f = active(), { match, foe } = S.battle;
+    if (!match || !$("scene")) return;
+    const [me, them] = match.agents;
+    $("log").innerHTML = "";
+    $("banner").className = "banner"; $("banner").textContent = "";
+    for (const side of ["player", "foe"]) $("mon-" + side).className = "mon " + side;
+    $("name-foe").textContent = them.name; $("lv-foe").textContent = "LV " + them.level;
+    $("name-player").textContent = me.name; $("lv-player").textContent = "LV " + me.level;
+    SP.draw($("mon-foe"), foe, {}); SP.draw($("mon-player"), f, { back: true });
+    $("mon-foe").setAttribute("aria-label", them.name);
+    setHp("player", me.max, me.max); setHp("foe", them.max, them.max);
+    const play = $("b-play"); play.disabled = false; play.textContent = "Pause";
+    $("readout").textContent = S.battle.label;
+    let phase = null;
+    const cur = [me.max, them.max];
+    try {
+      await say(`${them.name} wants to battle!`, 450);
+      await say(`Go, ${me.name}!`, 350);
+      for (const t of match.turns) {
+        if (t.phase !== phase) {
+          phase = t.phase;
+          $("readout").textContent = `Turn ${t.turn} · ${phase.toUpperCase()}${t.multiplier > 1 ? " ×" + t.multiplier : ""}`;
+          $("banner").textContent = phase.toUpperCase() + (t.multiplier > 1 ? `  ×${t.multiplier}` : "");
+          retrigger($("banner"), "show", 1500); await sleep(1250);
+        }
+        $("readout").textContent = `Turn ${t.turn} / ${E.TURNS} · ${phase.toUpperCase()}`;
+        // both moves land in the same turn; show them one after the other
+        for (let i = 0; i < 2; i++) {
+          const a = t.actions[i], att = i === 0 ? "player" : "foe", def = i === 0 ? "foe" : "player";
+          const sk = E.SKILLS[a.skill];
+          await say(`${a.agent_name} used ${sk.move}!`, 220);
+          logLine(t.turn, a, att);
+          const A = $("mon-" + att), D = $("mon-" + def);
+          if (sk.fx === "burst" && !reduce) retrigger(A, "lunge-" + att, 420);
+          if (sk.fx === "ghost") retrigger(A, "blink", 520);
+          if (sk.fx === "barrier" || sk.fx === "sparkle") retrigger(A, "rise", 500);
+          spawn(sk.fx, center(A), center(D), sk.color);
+          await sleep(sk.fx === "scan" ? 850 : 520);
+          retrigger(D, "hit", 480);
+          if (!reduce && a.effect === "super") retrigger($("scene"), "shake", 380);
+          const target = 1 - i;
+          cur[target] = Math.max(0, cur[target] - a.points);
+          setHp(def, cur[target], target === 0 ? me.max : them.max);
+          await sleep(300);
+          if (a.effect === "super") await say("It's super effective!", 450);
+          else if (a.effect === "resisted") await say("It's not very effective…", 400);
+        }
+        cur[0] = t.hp[0]; cur[1] = t.hp[1];
+        setHp("player", cur[0], me.max); setHp("foe", cur[1], them.max);
+      }
+      B.finished = true;
+      const w = match.winner;
+      $("readout").textContent = `Final · ${match.turns.length} turns`;
+      if (w === null) { $("banner").textContent = "DRAW"; $("banner").classList.add("stay"); await say("It's a draw!", 300); }
+      else {
+        const loserSide = w === 0 ? "foe" : "player", winner = match.agents[w], loser = match.agents[1 - w];
+        if (match.ko) { $("mon-" + loserSide).classList.add("faint"); await say(`${loser.name} fainted!`, 500); }
+        else await say("Time's up!", 400);
+        $("banner").textContent = `${winner.name} WINS`; $("banner").classList.add("stay");
+        await say(`${winner.name} wins with ${Math.ceil(winner.hp)} HP left.`, 300);
+      }
+      play.textContent = "Replay";
+    } catch (e) { if (!(e instanceof Cancel)) console.error(e); }
+  }
+
+  // ---------- boot ----------
+  S.fighters = loadLocal(); sortFighters();
+  S.activeId = S.fighters[0]?.id || null;
+  if (S.fighters.length) S.tab = "roster"; else openDesigner(null);
+  setStorage("loading");
+  render();
+  connectStorage();
+})();
+</script>
