@@ -51,6 +51,25 @@ def _table(rows: list, columns: list[str] | None = None) -> None:
         print("  ".join(v.ljust(w) for v, w in zip(row, widths)))
 
 
+def _match_line(m: dict) -> str | None:
+    """One line for a match summary, or None if it isn't the shape we know."""
+    agents = m.get("agents")
+    if not (isinstance(agents, list) and len(agents) == 2 and all(isinstance(a, dict) and "name" in a for a in agents)):
+        return None
+    a, b = agents
+    line = (f"{m.get('match_id', '?')}  {m.get('scenario_id', '')}  {m.get('status', '')}  "
+            f"{a['name']} {a.get('score', 0):g} - {b.get('score', 0):g} {b['name']}")
+    if m.get("status") == "completed":
+        winner = next((x["name"] for x in agents if x.get("id") == m.get("winner_id")), None)
+        line += f"  winner: {winner}" if winner else "  draw"
+    return line
+
+
+def _print_match(m: Any, as_json: bool) -> None:
+    line = None if as_json or not isinstance(m, dict) else _match_line(m)
+    print(line) if line else _print(m, as_json)
+
+
 def _client(args: argparse.Namespace) -> AIPvPClient:
     s = config.load(args.base_url)
     return AIPvPClient(s.base_url, s.token)
@@ -108,7 +127,8 @@ def cmd_agent_create(args: argparse.Namespace) -> None:
     except ValueError as e:  # bad skill name, or pydantic ValidationError (a ValueError subclass)
         msg = str(e) if not isinstance(e, ValidationError) else "; ".join(
             f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors())
-        sys.exit(f"Invalid agent: {msg}\nSkills: {', '.join(s.value for s in Skill)}")
+        hint = f"\nSkills: {', '.join(s.value for s in Skill)}" if "Skill" in msg or "skills" in msg else ""
+        sys.exit(f"Invalid agent: {msg}{hint}")
     with _client(args) as c:
         _print(c.create_agent(agent), args.json)
 
@@ -124,19 +144,26 @@ def cmd_agent_list(args: argparse.Namespace) -> None:
 
 def cmd_agent_history(args: argparse.Namespace) -> None:
     with _client(args) as c:
-        _print(c.agent_history(args.agent_id), args.json)
+        matches = c.agent_history(args.agent_id)
+    if args.json or not isinstance(matches, list):
+        _print(matches, True)
+    elif not matches:
+        print("(no matches yet)")
+    else:
+        for m in matches:
+            _print_match(m, False)
 
 
 def cmd_match_start(args: argparse.Namespace) -> None:
     with _client(args) as c:
         if not args.watch:
-            _print(c.start_match(args.agent_id, args.scenario), args.json)
+            _print_match(c.start_match(args.agent_id, args.scenario), args.json)
             return
 
         async def start() -> str | None:
             # Called once the socket is open, so no turns are missed.
             match = await asyncio.to_thread(c.start_match, args.agent_id, args.scenario)
-            _print(match, args.json)
+            _print_match(match, args.json)
             return match.get("match_id") or match.get("id")
 
         asyncio.run(_watch(c, None, start))
@@ -165,9 +192,10 @@ async def _watch(client: AIPvPClient, match_id: str | None, on_open=None) -> Non
     async for msg in client.watch(match_id, on_open):
         d = msg.get("data", {})
         if msg.get("type") == "turn_action":
-            print(f"T{d.get('turn', '?'):>2} {d.get('agent_name', '?')} [{d.get('skill', '?')}]: {d.get('content', '')}")
+            pts = f" +{d['points']:g}" if d.get("points") else ""
+            print(f"T{d.get('turn', '?'):>2} {d.get('agent_name', '?')} [{d.get('skill', '?')}]{pts}: {d.get('content', '')}")
         elif msg.get("type") == "match_end":
-            print("Match over:", json.dumps(d))
+            print("Match over:", _match_line(d) or json.dumps(d))
 
 
 def cmd_match_watch(args: argparse.Namespace) -> None:
@@ -181,7 +209,11 @@ def cmd_match_watch(args: argparse.Namespace) -> None:
 
 def cmd_queue(args: argparse.Namespace) -> None:
     with _client(args) as c:
-        _print(c.join_queue(args.agent_id, args.auto), args.json)
+        res = c.join_queue(args.agent_id, args.auto)
+    if not args.json and isinstance(res, dict) and isinstance(res.get("match"), dict):
+        print(f"Matched: {_match_line(res['match']) or json.dumps(res['match'])}")
+    else:
+        _print(res, args.json)
 
 
 def cmd_scenarios(args: argparse.Namespace) -> None:
@@ -207,12 +239,19 @@ def cmd_status(args: argparse.Namespace) -> None:
 # --- parser -----------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--base-url", help="API base URL (default: $AIPVP_BASE_URL, config file, or https://aipvp.io/api/v1)")
-    common.add_argument("--json", action="store_true", help="print raw JSON")
+    def global_options(defaults: bool) -> argparse.ArgumentParser:
+        # Accepted before or after the subcommand. Subcommands use SUPPRESS so their copy
+        # doesn't overwrite a value given before the subcommand with its default.
+        g = argparse.ArgumentParser(add_help=False)
+        g.add_argument("--base-url", default=None if defaults else argparse.SUPPRESS,
+                       help="API base URL (default: $AIPVP_BASE_URL, config file, or https://aipvp.io/api/v1)")
+        g.add_argument("--json", action="store_true", default=False if defaults else argparse.SUPPRESS,
+                       help="print raw JSON")
+        return g
 
+    common = global_options(defaults=False)
     p = argparse.ArgumentParser(prog="aipvp", description="Command-line client for the aipvp.io agent arena.",
-                                parents=[common])
+                                parents=[global_options(defaults=True)])
     sub = p.add_subparsers(dest="command", required=True)
 
     def add(parent, name, func, help_):
@@ -268,7 +307,7 @@ def main(argv: list[str] | None = None) -> None:
         args.func(args)
     except ApiError as e:
         hint = ""
-        if e.status == 401:
+        if e.status == 401 and args.func not in (cmd_login, cmd_register):
             hint = "\nRun `aipvp login EMAIL` first."
         elif e.status == 0:
             hint = "\nIs the server reachable? Use --base-url or $AIPVP_BASE_URL to point at another one (e.g. the mock)."

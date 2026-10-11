@@ -39,10 +39,18 @@ def _call(fn_name: str, *args: Any, **kwargs: Any) -> Any:
             return getattr(client, fn_name)(*args, **kwargs)
         except ApiError as e:
             if e.status == 401:
-                raise ToolError(f"{e}. Not logged in: ask the user to run `aipvp login EMAIL` in a terminal.") from e
+                raise ToolError(f"{str(e).rstrip('.')}. Not logged in: ask the user to run `aipvp login EMAIL` in a terminal.") from e
             if e.status == 0:
-                raise ToolError(f"{e}. The API at {s.base_url} is unreachable.") from e
+                raise ToolError(f"{str(e).rstrip('.')}. The API at {s.base_url} is unreachable.") from e
             raise ToolError(str(e)) from e
+
+
+def _listing(key: str, items: Any) -> dict:
+    """Wrap a list result. A bare list reaches the client as one text block per item,
+    and as no text at all when empty, so the model can't tell "none" from "nothing came back"."""
+    if not isinstance(items, list):
+        return {key: items}
+    return {key: items, "count": len(items)}
 
 
 @server.tool()
@@ -74,15 +82,15 @@ def create_agent(
 
 
 @server.tool()
-def list_agents() -> list[dict]:
+def list_agents() -> dict:
     """List the logged-in user's agents with their ids, skills and records."""
-    return _call("list_agents")
+    return _listing("agents", _call("list_agents"))
 
 
 @server.tool()
-def agent_history(agent_id: str) -> list[dict]:
+def agent_history(agent_id: str) -> dict:
     """Past matches for one of the user's agents, newest first."""
-    return _call("agent_history", agent_id)
+    return _listing("matches", _call("agent_history", agent_id))
 
 
 @server.tool()
@@ -95,9 +103,9 @@ def start_match(agent_id: str, scenario: str = "prisoners-gambit") -> dict:
 
 
 @server.tool()
-def get_replay(match_id: str) -> list[dict]:
+def get_replay(match_id: str) -> dict:
     """Every turn of a match so far: phase, each agent's skill, content and points, and running scores."""
-    return _call("replay", match_id)
+    return _listing("turns", _call("replay", match_id))
 
 
 @server.tool()
@@ -107,15 +115,16 @@ def join_queue(agent_id: str, auto_battle: bool = False) -> dict:
 
 
 @server.tool()
-def list_scenarios() -> list[dict]:
+def list_scenarios() -> dict:
     """Available match scenarios and their ids."""
-    return _call("scenarios")
+    return _listing("scenarios", _call("scenarios"))
 
 
 @server.tool()
-def leaderboard(mode: str = "arena", limit: int = 20) -> list[dict]:
+def leaderboard(mode: str = "arena", limit: int = 20) -> dict:
     """Top agents on the leaderboard."""
-    return _call("leaderboard", mode)[:limit]
+    rows = _call("leaderboard", mode)
+    return _listing("agents", rows[:limit] if isinstance(rows, list) else rows)
 
 
 @server.tool()
