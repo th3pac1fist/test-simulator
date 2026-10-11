@@ -26,7 +26,7 @@ async def test_tool_list():
     async with Client(server) as client:
         names = {t.name for t in (await client.list_tools()).tools}
     assert names == {"create_agent", "list_agents", "agent_history", "start_match", "get_replay",
-                     "join_queue", "list_scenarios", "leaderboard", "api_status"}
+                     "join_queue", "list_scenarios", "leaderboard", "api_status", "battle_viewer"}
     assert not any("login" in n or "password" in n for n in names)
 
 
@@ -57,3 +57,12 @@ async def test_empty_list_still_returns_text(logged_in_env):
     async with Client(server) as client:
         agents = payload(await client.call_tool("list_agents", {}))
     assert agents == {"agents": [], "count": 0}
+
+
+async def test_battle_viewer_tool(logged_in_env, tmp_path):
+    async with Client(server) as client:
+        agent = payload(await client.call_tool("create_agent", {"name": "VIEWED"}))
+        match = payload(await client.call_tool("start_match", {"agent_id": agent["id"]}))
+        out = tmp_path / "b.html"
+        res = payload(await client.call_tool("battle_viewer", {"match_id": match["match_id"], "output_path": str(out)}))
+    assert res["path"] == str(out.resolve()) and "VIEWED" in out.read_text()

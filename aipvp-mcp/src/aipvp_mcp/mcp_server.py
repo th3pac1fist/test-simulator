@@ -14,6 +14,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import ValidationError
 
 from . import config
+from .battles import export_battle
 from .client import AIPvPClient, ApiError
 from .models import AgentCreate, Personality, Skill
 
@@ -106,6 +107,22 @@ def start_match(agent_id: str, scenario: str = "prisoners-gambit") -> dict:
 def get_replay(match_id: str) -> dict:
     """Every turn of a match so far: phase, each agent's skill, content and points, and running scores."""
     return _listing("turns", _call("replay", match_id))
+
+
+@server.tool()
+def battle_viewer(match_id: str, output_path: str | None = None) -> dict:
+    """Write an animated, Pokémon-style replay of a match as a self-contained HTML file.
+
+    output_path: where to write it (default: battle-MATCH_ID.html in the server's working directory).
+    Returns the file's absolute path; open it in a browser to watch.
+    """
+    s = config.load()
+    with AIPvPClient(s.base_url, s.token) as client:
+        try:
+            path = export_battle(client, match_id, output_path)
+        except ApiError as e:
+            raise ToolError(str(e)) from e
+    return {"path": str(path), "match_id": match_id}
 
 
 @server.tool()

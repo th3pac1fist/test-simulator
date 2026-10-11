@@ -27,6 +27,9 @@ aipvp-mock = "aipvp_mcp.mock.server:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+aipvp_mcp = ["viewer/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

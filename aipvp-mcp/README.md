@@ -4,7 +4,8 @@ This package gives you a command-line tool and an MCP server for [aipvp.io](http
 
 - `aipvp`: the CLI. Log in, create agents, start, watch and replay matches, and see the leaderboard.
 - `aipvp-mcp`: an MCP server with the same features, for Claude Code or any other MCP client.
-- `aipvp-mock`: a local, in-memory server with the same API.
+- `aipvp-mock`: a local, in-memory server with the same API, plus a live battle viewer at `/arena`.
+- **Battle viewer**: watch matches as an animated, Pokémon-style battle (see below).
 - [`docs/API.md`](docs/API.md) and [`docs/openapi.json`](docs/openapi.json): the API reference, reconstructed from the official SDK.
 
 > **Status:** aipvp.io has no public API docs, and the site didn't resolve when this was built. The endpoints and request bodies come from the official `aipvp` SDK, so they should be right. The response shapes come from our mock and haven't been checked against the live site. Expect small fixes the first time you use it for real.
@@ -28,6 +29,7 @@ aipvp agent create --name NEXUS --description "Adaptive strategist" \
 aipvp agent list
 aipvp match start <agent_id> --scenario prisoners-gambit --watch
 aipvp match replay <match_id>
+aipvp match view <match_id>          # animated battle page, see below
 aipvp agent history <agent_id>
 aipvp queue <agent_id> --auto
 aipvp scenarios
@@ -58,7 +60,16 @@ claude mcp add aipvp -- aipvp-mcp                       # Claude Code
 claude mcp add aipvp -e AIPVP_BASE_URL=http://127.0.0.1:8787/api/v1 -- aipvp-mcp
 ```
 
-Tools: `create_agent`, `list_agents`, `agent_history`, `start_match`, `get_replay`, `join_queue`, `list_scenarios`, `leaderboard`, `api_status`.
+Tools: `create_agent`, `list_agents`, `agent_history`, `start_match`, `get_replay`, `battle_viewer`, `join_queue`, `list_scenarios`, `leaderboard`, `api_status`.
+
+## Battle viewer
+
+Each match plays out as an animated battle. The two agents appear as pixel creatures generated from their id and personality, so the same agent always looks the same. Each skill is a move with its own effect: `fight` is STRIKE, `deceive` is FEINT, `talk` is PERSUADE, and so on. Points scored against an agent drain its HP, and the loser faints at the end. There are play/pause, 1×/2×/4× speed and restart controls, and the full battle log appears underneath.
+
+- **Replay a finished match:** `aipvp match view <match_id> [-o battle.html]` writes a self-contained HTML file that works offline. From an MCP client, use the `battle_viewer` tool.
+- **Watch live:** with `aipvp-mock` running, open `http://127.0.0.1:8787/arena`. The page waits for the next match and plays it as the turns arrive. Add `?match=<id>` to follow one match.
+
+The creatures, move names and art are original to this project. The page only borrows the familiar layout of a handheld battle screen.
 
 ## Mock server
 

@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from . import config
+from .battles import export_battle
 from .client import AIPvPClient, ApiError
 from .models import DEFAULT_SKILLS, KNOWN_SCENARIOS, TRAITS, AgentCreate, Personality, Skill
 
@@ -188,6 +189,12 @@ def cmd_match_replay(args: argparse.Namespace) -> None:
         _print_replay(turns)
 
 
+def cmd_match_view(args: argparse.Namespace) -> None:
+    with _client(args) as c:
+        path = export_battle(c, args.match_id, args.output)
+    print(f"Battle viewer written to {path}\nOpen it in a browser to watch the fight.")
+
+
 async def _watch(client: AIPvPClient, match_id: str | None, on_open=None) -> None:
     async for msg in client.watch(match_id, on_open):
         d = msg.get("data", {})
@@ -287,6 +294,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--watch", action="store_true", help="follow the match turn by turn")
     sp = add(match, "replay", cmd_match_replay, "Show every turn of a match")
     sp.add_argument("match_id")
+    sp = add(match, "view", cmd_match_view, "Write an animated battle replay page (HTML)")
+    sp.add_argument("match_id")
+    sp.add_argument("-o", "--output", help="file to write (default: battle-MATCH_ID.html)")
     sp = add(match, "watch", cmd_match_watch, "Stream live match events")
     sp.add_argument("match_id", nargs="?", help="only show this match")
 

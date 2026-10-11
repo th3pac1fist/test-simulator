@@ -261,6 +261,52 @@
         ]
       }
     },
+    "/api/v1/matches/{match_id}": {
+      "get": {
+        "summary": "Get Match",
+        "operationId": "get_match_api_v1_matches__match_id__get",
+        "parameters": [
+          {
+            "name": "match_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Match Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Match Api V1 Matches  Match Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/v1/matches/{match_id}/replay": {
       "get": {
         "summary": "Replay",
@@ -435,6 +481,29 @@
             }
           }
         }
+      }
+    },
+    "/arena": {
+      "get": {
+        "summary": "Arena Page",
+        "operationId": "arena_page_arena_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     }
   },

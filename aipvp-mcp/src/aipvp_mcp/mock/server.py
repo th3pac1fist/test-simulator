@@ -20,9 +20,11 @@ import uuid
 from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from ..models import KNOWN_SCENARIOS, TRAITS, AgentCreate
+from ..viewer import render_live
 
 MAX_TURNS = 12
 
@@ -340,6 +342,17 @@ def create_app(turn_delay: float | None = None) -> FastAPI:
         m = await arena.start(agent, opponent, body.scenario_id)
         return m.summary()
 
+    @api.get("/matches/{match_id}")
+    def get_match(match_id: str) -> dict:
+        m = arena.matches.get(match_id)
+        if not m:
+            raise HTTPException(404, f"Match {match_id} not found.")
+        summary = m.summary()
+        for entry in summary["agents"]:
+            a = arena.agents[entry["id"]]
+            entry.update(rating=a.rating, personality=a.personality, skills=a.skills, house=a.house)
+        return summary
+
     @api.get("/matches/{match_id}/replay")
     def replay(match_id: str) -> list[dict]:
         m = arena.matches.get(match_id)
@@ -383,6 +396,10 @@ def create_app(turn_delay: float | None = None) -> FastAPI:
 
     app.include_router(api)
 
+    @app.get("/arena", response_class=HTMLResponse)
+    def arena_page() -> str:
+        return render_live()
+
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:
         await socket.accept()
@@ -408,6 +425,7 @@ def main(argv: list[str] | None = None) -> None:
                    help="Seconds between match turns (default 0.5, env AIPVP_MOCK_TURN_DELAY). 0 = instant.")
     args = p.parse_args(argv)
     print(f"Mock API at http://{args.host}:{args.port}/api/v1  (export AIPVP_BASE_URL to use it)")
+    print(f"Live battle viewer at http://{args.host}:{args.port}/arena")
     uvicorn.run(create_app(args.turn_delay), host=args.host, port=args.port, log_level="warning")
 
 
