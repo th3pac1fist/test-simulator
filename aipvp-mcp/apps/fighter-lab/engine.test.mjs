@@ -91,7 +91,7 @@ test("items: one per battle, acts first, potion heals", () => {
   assert.equal(E.legalMask(st, 0)[E.ITEM_SLOT], 1);
   const t = E.resolveTurn(st, [{ kind: "item" }, { kind: "skill", skill: "fight" }], r);
   assert.equal(t.actions[0].order, 1);
-  assert.equal(t.actions[0].healed, 25);
+  assert.equal(t.actions[0].healed, Math.round(E.ITEMS.potion.heal * st.side[0].max * 100) / 100);
   assert.equal(E.legalMask(st, 0)[E.ITEM_SLOT], 0, "used up");
 });
 
@@ -201,6 +201,79 @@ test("balance: skills with equal power budgets win about equally often", () => {
 });
 
 // ---------------------------------------------------------------- learning
+// stat and item balance: trained fighters, identical except for the thing being compared
+const TRAIN5 = ["brawler", "talker", "schemer", "turtle", "cycler"];
+function trained(moves, level, { stats, item, rules } = {}, seed = 1) {
+  let f = E.createFighter({ name: "T", moves, item: item || null }, E.rng(seed));
+  f.level = level; f.xp = E.xpForLevel(level);
+  if (stats) f = E.setStats(f, stats);
+  if (rules) f.rules = E.sanitizeRules(rules, f.moves);
+  const r = E.rng(seed + 3);
+  for (let i = 0; i < 200; i++) E.fight(f, E.partnerFighter(TRAIN5[i % 5], f), { rng: r, learnA: true });
+  return f;
+}
+const H2H_LOADOUTS = [["fight", "negotiate", "code", "shield"], ["fight", "talk", "strategize", "shield"], ["deceive", "debate", "code", "analyze"], ["fight", "debate", "search", "observe"]];
+function headToHead(makeA, makeB, seeds, n = 50, loadouts = H2H_LOADOUTS) {
+  let s = 0, k = 0;
+  for (const mv of loadouts) for (const seed of seeds) {
+    const a = makeA(mv, seed), b = makeB(mv, seed), r = E.rng(seed * 97);
+    for (let i = 0; i < n; i++) { s += score(E.fight(E.clone(a), E.clone(b), { rng: r })); k++; }
+  }
+  return s / k;
+}
+
+test("balance: Power and Vitality are worth about the same at every level, and Speed matters", () => {
+  for (const level of [4, 15, 35]) {
+    const n = level - 1;
+    const pv = headToHead((mv, sd) => trained(mv, level, { stats: { power: n, vitality: 0, speed: 0 } }, sd),
+                          (mv, sd) => trained(mv, level, { stats: { power: 0, vitality: n, speed: 0 } }, sd), [1, 2, 3, 4, 5]);
+    assert.ok(Math.abs(pv - 0.5) <= 0.08, `L${level}: all-Power vs all-Vitality ${pv.toFixed(3)}`);
+  }
+  // Speed is a real stat: dodging beats putting nothing anywhere
+  const sp = headToHead((mv, sd) => trained(mv, 15, { stats: { power: 0, vitality: 0, speed: 14 } }, sd),
+                        (mv, sd) => trained(mv, 15, {}, sd), [1, 2]);
+  assert.ok(sp > 0.6, `L15: all-Speed vs no points ${sp.toFixed(3)}`);
+  assert.equal(E.maxHp(4, 0), 64);
+  assert.equal(E.maxHp(4, 10), Math.round(64 * (1 + 10 * E.STAT_PCT.vitality)), "Vitality is a share of base HP");
+});
+
+test("balance: a Potion with a low-HP rule helps but doesn't decide battles", () => {
+  const rules = [{ when: { kind: "my_hp_below", value: 35 }, do: { item: true } }];
+  const withPotion = headToHead((mv, sd) => trained(mv, 4, { item: "potion", rules }, sd), (mv, sd) => trained(mv, 4, {}, sd), [1, 2, 3]);
+  const withSmoke = headToHead((mv, sd) => trained(mv, 4, { item: "smoke", rules: [{ when: { kind: "phase_is", value: "endgame" }, do: { item: true } }] }, sd), (mv, sd) => trained(mv, 4, {}, sd), [1, 2, 3]);
+  assert.ok(withPotion > 0.5 && withPotion < 0.68, `potion vs no item ${withPotion.toFixed(3)} (was about 0.9 with a flat 25 HP)`);
+  assert.ok(Math.abs(withPotion - withSmoke) < 0.12, `potion ${withPotion.toFixed(3)} vs smoke ${withSmoke.toFixed(3)}`);
+});
+
+test("speed dodges: a dodged attack lands nothing, and dodging is capped", () => {
+  const a = E.createFighter({ moves: BALANCED }), b = E.setStats({ ...E.createFighter({ moves: BALANCED }), level: 50, xp: E.xpForLevel(50) }, { power: 0, vitality: 0, speed: 49 });
+  let dodged = 0, n = 400;
+  const r = E.rng(5);
+  for (let i = 0; i < n; i++) {
+    const st = E.newBattle(E.clone(a), E.clone(b));
+    const t = E.resolveTurn(st, [{ kind: "skill", skill: "fight" }, { kind: "skill", skill: "talk" }], r);
+    const mine = t.actions[0];
+    if (mine.notes.some((x) => /dodges/.test(x))) { dodged++; assert.equal(mine.points, 0); }
+  }
+  assert.ok(Math.abs(dodged / n - E.STAT_PCT.dodgeCap) < 0.07, `dodge rate ${(dodged / n).toFixed(2)} at the cap`);
+});
+
+test("rule: my energy is below X (for Ether)", () => {
+  const f = E.createFighter({ moves: BALANCED, item: "ether" });
+  f.rules = E.sanitizeRules([{ when: { kind: "my_energy_below", value: 2 }, do: { item: true } }], f.moves);
+  const st = E.newBattle(f, E.createFighter({ moves: BALANCED }));
+  assert.equal(E.ruleChoice(st, 0), null, "starts with 3 energy");
+  st.side[0].energy = 1;
+  assert.equal(E.ruleChoice(st, 0).kind, "item");
+});
+
+test("fitSkill shrinks turns and ticks when scaling numbers isn't enough", () => {
+  const v = E.fitSkill({ name: "Renew", kind: "active", style: "guard", effects: [{ type: "regen", heal: 3, every: 1, turns: 4 }, { type: "damage", power: 1.5 }] }, 4);
+  assert.ok(v.skill && !v.overBudget && v.scaled, v.errors.join(" "));
+  assert.ok(v.skill.budget <= E.maxSkillBudget(4) && v.skill.budget > E.maxSkillBudget(4) * 0.8, `uses most of the budget: ${v.skill.budget}`);
+  assert.ok(v.skill.effects.some((e) => e.type === "regen"), "keeps the idea");
+});
+
 test("training makes a fighter measurably stronger against each style", () => {
   for (const partner of ["brawler", "talker", "schemer", "turtle"]) {
     let f = E.createFighter({ name: "ROOKIE", moves: BALANCED }, E.rng(7));

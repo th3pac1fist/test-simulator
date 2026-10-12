@@ -70,21 +70,25 @@
   const ELEMENTS = ["none", "fire", "ice", "storm", "poison", "light", "shadow", "earth", "water", "tech", "spirit"];
 
   /** Power budget of one effect: roughly "damage-equivalent per use". */
+  // Price of each effect, in "damage points per use". Calibrated by simulation so that skills with
+  // equal budgets win about equally often (see the balance tests).
+  const PRICE = { drain: 0.67, burn: 0.237, poison: 2.8, stun: 2.5, shieldBase: 0.183, shieldTurn: 0.092, heal: 0.65, regen: 0.65,
+                  weaken: 1.47, focus: 1.6, cleanse: 1.2, energy_gain: 1.1, energy_drain: 0.35 };
   function effectBudget(e, totalPower) {
     switch (e.type) {
       case "damage": return e.power * (e.hits || 1);
-      case "drain": return e.pct * totalPower * 0.45;
-      case "burn": return e.chance * e.damage * e.turns * 0.55;
-      case "poison": return e.chance * e.stacks * 2.8;
-      case "stun": return e.chance * 4.2;
-      case "shield": return e.amount * (0.3 + 0.15 * e.turns);
-      case "heal": return e.amount * 0.65;
-      case "regen": return e.heal * Math.floor(e.turns / e.every) * 0.65;
-      case "weaken": return e.pct * e.turns * 2.2;
-      case "focus": return (e.mult - 1) * 2.8;
-      case "cleanse": return 1.2;
-      case "energy_gain": return e.amount * 1.1;
-      case "energy_drain": return e.amount * 0.35;
+      case "drain": return e.pct * totalPower * PRICE.drain;
+      case "burn": return e.chance * e.damage * e.turns * PRICE.burn;
+      case "poison": return e.chance * e.stacks * PRICE.poison;
+      case "stun": return e.chance * PRICE.stun;
+      case "shield": return e.amount * (PRICE.shieldBase + PRICE.shieldTurn * e.turns);
+      case "heal": return e.amount * PRICE.heal;
+      case "regen": return e.heal * Math.floor(e.turns / e.every) * PRICE.regen;
+      case "weaken": return e.pct * e.turns * PRICE.weaken;
+      case "focus": return (e.mult - 1) * PRICE.focus;
+      case "cleanse": return PRICE.cleanse;
+      case "energy_gain": return e.amount * PRICE.energy_gain;
+      case "energy_drain": return e.amount * PRICE.energy_drain;
       default: return 0;
     }
   }
@@ -219,19 +223,47 @@
     const first = validateSkill(raw, { level });
     if (!first.skill || !first.overBudget) return first;
     const cap = first.skill.kind === "passive" ? maxPassiveBudget(level) : maxSkillBudget(level);
-    const scaled = (k) => ({ ...first.skill, effects: first.skill.effects.map((e) => {
-      const def = (first.skill.kind === "passive" ? PASSIVE_EFFECTS : EFFECTS)[e.type], out = { ...e };
-      for (const [key, spec] of Object.entries(def.params)) {
+    const table = first.skill.kind === "passive" ? PASSIVE_EFFECTS : EFFECTS;
+    const budgetOf = (sk) => validateSkill(sk, { level }).skill.budget;
+    // 1. Shrink whole-number knobs one step at a time (fewer hits, shorter effects, rarer regen ticks)
+    //    until scaling the rest can fit.
+    let base = { ...first.skill, effects: first.skill.effects.map((e) => ({ ...e })) };
+    const floorOf = (sk) => budgetOf(scaleCont(sk, 0));
+    for (let guard = 0; guard < 40 && floorOf(base) > cap; guard++) {
+      let best = null;
+      base.effects.forEach((e, i) => {
+        const def = table[e.type];
+        for (const key of ["hits", "turns", "every"]) {
+          const spec = def.params[key];
+          if (!spec || e[key] === undefined) continue;
+          const next = key === "every" ? e[key] + spec[2] : e[key] - spec[2];
+          if (next < spec[0] || next > spec[1]) continue;
+          const trial = { ...base, effects: base.effects.map((x, j) => (j === i ? { ...x, [key]: next } : x)) };
+          const saved = floorOf(base) - floorOf(trial);
+          if (saved > 0 && (!best || saved < best.saved)) best = { trial, saved };   // smallest step: keep as much of the idea as possible
+        }
+      });
+      if (!best) break;
+      base = best.trial;
+    }
+    // 2. Scale the continuous numbers down together to land just under the cap.
+    let lo = 0, hi = 1;
+    for (let i = 0; i < 30; i++) { const mid = (lo + hi) / 2; if (budgetOf(scaleCont(base, mid)) <= cap) lo = mid; else hi = mid; }
+    const v = validateSkill(scaleCont(base, lo), { level });
+    if (v.overBudget) return first;
+    return { ...v, errors: [`Scaled down to fit level ${level} (power ${v.skill.budget} of ${cap}).`], scaled: true };
+  }
+  /** Multiply a skill's continuous effect numbers by k (validation clamps them to their ranges). */
+  function scaleCont(skill, k) {
+    const table = skill.kind === "passive" ? PASSIVE_EFFECTS : EFFECTS;
+    return { ...skill, effects: skill.effects.map((e) => {
+      const out = { ...e };
+      for (const [key, spec] of Object.entries(table[e.type].params)) {
         if (typeof spec[0] === "string" || key === "every" || key === "hits" || key === "turns") continue;
         out[key] = e[key] * k;
       }
       return out;
-    }) });
-    let lo = 0, hi = 1;
-    for (let i = 0; i < 30; i++) { const mid = (lo + hi) / 2; if (validateSkill(scaled(mid), { level }).skill.budget <= cap) lo = mid; else hi = mid; }
-    const v = validateSkill(scaled(lo), { level });
-    if (v.overBudget) return first;
-    return { ...v, errors: [`Scaled down to fit level ${level} (power ${v.skill.budget} of ${cap}).`], scaled: true };
+    }) };
   }
 
   // =====================================================================================
@@ -280,7 +312,7 @@
   // Items (consumable, one per battle; using one takes your turn but acts first)
   // =====================================================================================
   const ITEMS = {
-    potion:  { id: "potion",  name: "POTION",     blurb: "Heals 25 HP.", price: 12 },
+    potion:  { id: "potion",  name: "POTION",     blurb: "Heals 15% of max HP.", price: 12, heal: 0.15 },
     ether:   { id: "ether",   name: "ETHER",      blurb: "+4 energy.", price: 10 },
     antidote:{ id: "antidote",name: "ANTIDOTE",   blurb: "Cures burn, poison and weaken, and blocks new ones this turn.", price: 8 },
     smoke:   { id: "smoke",   name: "SMOKE BOMB", blurb: "Their damage is halved for 2 turns.", price: 10 },
@@ -319,7 +351,10 @@
     return { power: s.power | 0, vitality: s.vitality | 0, speed: s.speed | 0 };
   }
   function unspentPoints(f) { const s = statsOf(f); return Math.max(0, statPointsFor(f.level || 1) - s.power - s.vitality - s.speed); }
-  function maxHp(level, vitality = 0) { return 55 + 3 * (level - 1) + 4 * vitality; }
+  // Each stat point: Power +3% damage, Vitality +x% max HP, Speed +y% chance to dodge an attack (capped).
+  // All are percentages, so their worth doesn't drift as levels raise base HP. Tuned by balance simulations.
+  const STAT_PCT = { power: 0.03, vitality: 0.04, speed: 0.02, dodgeCap: 0.4 };
+  function maxHp(level, vitality = 0) { return Math.round((55 + 3 * (level - 1)) * (1 + STAT_PCT.vitality * vitality)); }
   function levelBonus(level) { return 1 + 0.02 * (level - 1); }
   function masteryBonus(uses) { return 0.5 * (1 - Math.exp(-(uses || 0) / 400)); }
   function xpForMatch(result, myLevel, theirLevel) {
@@ -491,6 +526,7 @@
     my_hp_below:      { label: "My HP is below", value: [10, 90, 5], unit: "%" },
     their_hp_below:   { label: "Their HP is below", value: [10, 90, 5], unit: "%" },
     my_energy_at_least: { label: "My energy is at least", value: [1, 10, 1], unit: "" },
+    my_energy_below:  { label: "My energy is below", value: [1, 10, 1], unit: "" },
     i_have:           { label: "I am", value: ["burn", "poison", "weaken"] },
     they_have:        { label: "They are", value: ["burn", "poison", "weaken", "shield"] },
     phase_is:         { label: "The phase is", value: ["opening", "midgame", "endgame"] },
@@ -533,8 +569,10 @@
       burn: null, poison: null, weaken: null, focus: 0, stunned: false, stunImmuneUntil: 0, regen: [],
       itemLeft: !!(f.item && ITEMS[f.item]), smoke: 0, statusBlock: 0,
       last: null, styleCounts: { aggro: 0, social: 0, mind: 0, guard: 0 }, scripted: !f.brain, learn: false, imitate: false, speed: st.speed,
+      scale: levelBonus(f.level || 1),                                          // heals grow with level
+      punch: levelBonus(f.level || 1) * (1 + STAT_PCT.power * st.power),       // shields, burn and poison grow like damage
     };
-    for (const e of passiveEffects(f)) if (e.type === "start_shield") s.shield = { amount: e.amount, turns: 99 };
+    for (const e of passiveEffects(f)) if (e.type === "start_shield") s.shield = { amount: round2(e.amount * s.punch), turns: 99 };
     return s;
   }
   /** opts: { learnA, learnB } — whether each side's instincts learn from this battle. */
@@ -569,6 +607,7 @@
       case "my_hp_below": return (me.hp / me.max) * 100 < v;
       case "their_hp_below": return (them.hp / them.max) * 100 < v;
       case "my_energy_at_least": return me.energy >= v;
+      case "my_energy_below": return me.energy < v;
       case "i_have": return !!me[v];
       case "they_have": return v === "shield" ? !!(them.shield && them.shield.amount > 0) : !!them[v];
       case "phase_is": return PHASES[phaseOf(state.turn)].id === v;
@@ -613,6 +652,7 @@
 
   // ---------- resolving a turn ----------
   function addLog(log, text) { log.push(text); }
+  const HOSTILE_EFFECTS = new Set(["damage", "burn", "poison", "stun", "weaken", "energy_drain"]);
   function applyDamage(state, att, def, sk, power, hits, mult, r, out) {
     const a = state.side[att], d = state.side[def];
     let total = 0;
@@ -622,7 +662,7 @@
     a.focus = 0;
     for (let h = 0; h < hits; h++) {
       let dmg = power * mult * tm * (1 + masteryBonus(a.f.uses?.[sk.id])) * levelBonus(a.f.level || 1)
-        * (1 + 0.03 * statsOf(a.f).power) * (1 + boost) * focus * (0.9 + 0.2 * r());
+        * (1 + STAT_PCT.power * statsOf(a.f).power) * (1 + boost) * focus * (0.9 + 0.2 * r());
       if (a.weaken) dmg *= 1 - a.weaken.pct;
       if (a.smoke > 0) dmg *= 0.5;
       dmg = round2(dmg);
@@ -655,7 +695,7 @@
       const it = ITEMS[me.f.item];
       me.itemLeft = false;
       out.item = it.id;
-      if (it.id === "potion") { const before = me.hp; me.hp = Math.min(me.max, round2(me.hp + 25)); out.healed = round2(me.hp - before); }
+      if (it.id === "potion") { const before = me.hp; me.hp = Math.min(me.max, round2(me.hp + it.heal * me.max)); out.healed = round2(me.hp - before); }
       else if (it.id === "ether") me.energy = Math.min(ENERGY.max, me.energy + 4);
       else if (it.id === "antidote") { me.burn = me.poison = me.weaken = null; me.statusBlock = 1; }
       else if (it.id === "smoke") them.smoke = 2;
@@ -666,19 +706,23 @@
     me.energy -= sk.energy;
     if (sk.cooldown) me.cooldowns[sk.id] = sk.cooldown + 1;   // +1: counted down at the end of this turn
     const dmgE = sk.effects.find((e) => e.type === "damage");
+    const dodge = Math.min(STAT_PCT.dodgeCap, STAT_PCT.speed * (them.speed || 0));
+    const hostile = sk.effects.some((e) => HOSTILE_EFFECTS.has(e.type));
+    if (hostile && dodge > 0 && r() < dodge) { out.dodged = true; out.notes.push(`${them.f.name} dodges`); }
     let dealt = 0;
-    if (dmgE) dealt = applyDamage(state, i, 1 - i, sk, dmgE.power, dmgE.hits || 1, mult, r, out);
+    if (dmgE && !out.dodged) dealt = applyDamage(state, i, 1 - i, sk, dmgE.power, dmgE.hits || 1, mult, r, out);
     out.points = dealt;
     for (const e of sk.effects) {
+      if (out.dodged && HOSTILE_EFFECTS.has(e.type)) continue;   // a dodged attack lands nothing on them
       switch (e.type) {
         case "drain": if (dealt > 0) { const h = round2(dealt * e.pct); me.hp = Math.min(me.max, round2(me.hp + h)); out.healed = round2((out.healed || 0) + h); } break;
-        case "burn": if (tryStatus(state, 1 - i, "burn", e.chance, r, out)) { them.burn = { damage: Math.max(e.damage, them.burn?.damage || 0), turns: Math.max(e.turns, them.burn?.turns || 0) }; out.applied.push("burn"); } break;
-        case "poison": if (tryStatus(state, 1 - i, "poison", e.chance, r, out)) { them.poison = { stacks: Math.min(5, (them.poison?.stacks || 0) + e.stacks), turns: 4 }; out.applied.push("poison"); } break;
+        case "burn": if (tryStatus(state, 1 - i, "burn", e.chance, r, out)) { them.burn = { damage: Math.max(round2(e.damage * me.punch), them.burn?.damage || 0), turns: Math.max(e.turns, them.burn?.turns || 0) }; out.applied.push("burn"); } break;
+        case "poison": if (tryStatus(state, 1 - i, "poison", e.chance, r, out)) { them.poison = { stacks: Math.min(5, (them.poison?.stacks || 0) + e.stacks), turns: 4, per: Math.max(me.punch, them.poison?.per || 1) }; out.applied.push("poison"); } break;
         case "stun": if (tryStatus(state, 1 - i, "stun", e.chance, r, out)) { them.stunned = true; out.applied.push("stun"); } break;
         case "weaken": if (tryStatus(state, 1 - i, "weaken", 1, r, out)) { them.weaken = { pct: Math.max(e.pct, them.weaken?.pct || 0), turns: Math.max(e.turns, them.weaken?.turns || 0) }; out.applied.push("weaken"); } break;
-        case "shield": me.shield = { amount: Math.min(20, round2((me.shield?.amount || 0) + e.amount)), turns: Math.max(e.turns, me.shield?.turns || 0) }; out.applied.push("shield"); break;
-        case "heal": { const before = me.hp; me.hp = Math.min(me.max, round2(me.hp + e.amount)); out.healed = round2((out.healed || 0) + me.hp - before); break; }
-        case "regen": if (me.regen.length < 2) { me.regen.push({ heal: e.heal, every: e.every, turns: e.turns, age: 0 }); out.applied.push("regen"); } break;
+        case "shield": me.shield = { amount: Math.min(round2(20 * me.punch), round2((me.shield?.amount || 0) + e.amount * me.punch)), turns: Math.max(e.turns, me.shield?.turns || 0) }; out.applied.push("shield"); break;
+        case "heal": { const before = me.hp; me.hp = Math.min(me.max, round2(me.hp + e.amount * me.scale)); out.healed = round2((out.healed || 0) + me.hp - before); break; }
+        case "regen": if (me.regen.length < 2) { me.regen.push({ heal: round2(e.heal * me.scale), every: e.every, turns: e.turns, age: 0 }); out.applied.push("regen"); } break;
         case "focus": me.focus = Math.max(me.focus || 1, e.mult); out.applied.push("focus"); break;
         case "cleanse": me.burn = me.poison = me.weaken = null; out.applied.push("cleanse"); break;
         case "energy_gain": me.energy = Math.min(ENERGY.max, me.energy + e.amount); break;
@@ -691,11 +735,11 @@
     for (const s of state.side) {
       if (s.hp <= 0) continue;
       if (s.burn) { s.hp = Math.max(0, round2(s.hp - s.burn.damage)); events.push({ who: s.f.name, kind: "burn", amount: s.burn.damage }); if (--s.burn.turns <= 0) s.burn = null; }
-      if (s.poison && s.hp > 0) { s.hp = Math.max(0, round2(s.hp - s.poison.stacks)); events.push({ who: s.f.name, kind: "poison", amount: s.poison.stacks }); if (--s.poison.turns <= 0) s.poison = null; }
+      if (s.poison && s.hp > 0) { const d = round2(s.poison.stacks * (s.poison.per || 1)); s.hp = Math.max(0, round2(s.hp - d)); events.push({ who: s.f.name, kind: "poison", amount: d }); if (--s.poison.turns <= 0) s.poison = null; }
       const heals = [];
       for (const rg of s.regen) { rg.age++; if (rg.age % rg.every === 0) heals.push(rg.heal); }
       s.regen = s.regen.filter((rg) => rg.age < rg.turns);
-      for (const e of passiveEffects(s.f)) if (e.type === "regen" && state.turn % e.every === 0) heals.push(e.heal);
+      for (const e of passiveEffects(s.f)) if (e.type === "regen" && state.turn % e.every === 0) heals.push(round2(e.heal * s.scale));
       for (const h of heals) if (s.hp > 0) { const b = s.hp; s.hp = Math.min(s.max, round2(s.hp + h)); if (s.hp > b) events.push({ who: s.f.name, kind: "regen", amount: round2(s.hp - b) }); }
       if (s.weaken && --s.weaken.turns <= 0) s.weaken = null;
       if (s.shield && --s.shield.turns <= 0) s.shield = null;
@@ -768,7 +812,7 @@
         style: sk ? sk.style : null, points: o.points || 0, order: o.order,
         effect: o.typeMult > 1 ? "super" : o.typeMult < 1 ? "resisted" : "neutral",
         applied: o.applied, notes: o.notes, healed: o.healed || 0, absorbed: o.absorbed || 0, reflected: o.reflected || 0,
-        stunned: !!o.stunned, fizzled: !!o.fizzled, skipped: !!o.skipped, item: o.item || null,
+        stunned: !!o.stunned, fizzled: !!o.fizzled, skipped: !!o.skipped, dodged: !!o.dodged, item: o.item || null,
         content: sk ? sk.say.replace("{me}", f.name).replace("{them}", side[1 - i].f.name) : "",
         ...(p.source ? { source: p.source } : {}), ...(p.line ? { line: p.line } : {}), ...(p.rule ? { rule: p.rule } : {}),
       };
@@ -1178,7 +1222,7 @@
     newBattle, legalMask, isLegal, instinctChoice, instinctOdds, ruleChoice, resolveTurn, finishBattle, phaseOf, actionOf, slotOf,
     sanitizeRules, describeRule,
     fight, train, evaluate, exhibition, newSpar, sparTurn, finishSpar, aipvpCommand, clone,
-    PERSONA_MAX, PLAYBOOK_MAX, upgradeFighter, awardBattle, RIVALS, RIVAL_SKILLS, rivalFighter,
+    PERSONA_MAX, PLAYBOOK_MAX, upgradeFighter, awardBattle, RIVALS, RIVAL_SKILLS, rivalFighter, STAT_PCT, PRICE,
     toPublic, sanitizePublic, sanitizeResult, arenaRatings, cleanText, cleanName, compactBrain,
   };
 });

@@ -355,6 +355,21 @@ input[type="number"] { width: 5.5em; font-variant-numeric: tabular-nums; }
 .src.you { border-color: var(--fg); color: var(--fg); }
 .airow > span { flex: 1 1 12em; min-width: 0; }
 @media (max-width: 460px) { .slots, .acts { grid-template-columns: 1fr 1fr; } .slot select { font-size: 13px; } }
+
+/* ---- Pro build (owner only) ---- */
+.pro { border-color: var(--accent); box-shadow: inset 4px 0 0 var(--accent); }
+.pro .outcome .note { font-family: var(--font-body); font-size: 14px; font-weight: 400; }
+.pro ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.pro-skills li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 8px 10px; border-radius: 8px; background: var(--bg);
+  border: 1px solid var(--line); box-shadow: inset 4px 0 0 var(--c, var(--line)); min-width: 0; }
+.pro-skills li b { font-family: var(--font-label); font-size: 12px; font-weight: 400; letter-spacing: 0.04em; }
+.pro-skills li .note { flex-basis: 100%; font-size: 12px; }
+.pro-rates li { display: grid; grid-template-columns: minmax(0, 1fr) auto 6em; gap: 8px; align-items: baseline; font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.pro-rates li b { font-variant-numeric: tabular-nums; }
+.pro-rates li .note { text-align: right; font-size: 12px; }
+.pro-why li, .pro-path li { font-size: 13px; padding-left: 14px; position: relative; overflow-wrap: anywhere; }
+.pro-why li::before, .pro-path li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 6px; height: 6px; border-radius: 2px; background: var(--accent); }
+.pro .lab { font-family: var(--font-label); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 4px; }
 </style>
 
 <main class="wrap">
@@ -385,6 +400,7 @@ input[type="number"] { width: 5.5em; font-variant-numeric: tabular-nums; }
 
 <script src="engine.js"></script>
 <script src="economy.js"></script>
+<script src="optimizer.js"></script>
 <script src="agent.js"></script>
 <script src="sprites.js"></script>
 <script src="app.js"></script>

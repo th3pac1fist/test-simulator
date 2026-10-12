@@ -30,6 +30,7 @@
     "- Energy: start with 3, gain 2 each turn, hold at most 10. Each skill costs energy. Some skills have a cooldown before they can be used again.",
     "- Order: items act first, then skills that shield or stun, then the faster fighter. A stun that lands before the target acts cancels its action; a stunned fighter can't be stunned again for 2 turns.",
     "- Burn and poison deal damage at the end of each turn. Shields absorb damage. Weaken lowers the target's damage. Focus multiplies your next hit.",
+    "- Stats: Power adds damage, Vitality adds max HP, Speed gives a chance to dodge an attack completely (its damage and effects). A Potion heals 15% of max HP. Shields, heals, burn and poison grow with level, like damage.",
     "- Damage is multiplied by the phase: turns 1-4 x1, 5-8 x1.5, 9-12 x2. Healing and burn/poison are not.",
     "- At 0 HP a fighter is knocked out. After 12 turns the fighter with the higher share of HP left wins.",
   ].join("\n");
@@ -299,6 +300,49 @@
     return out;
   }
 
+  // ---------- Pro build: Claude writes the mind for an optimized build ----------
+  /** `f` is the fighter as the build will make it; `report` is the optimizer's result. Only game data goes in:
+   *  arena opponents appear by number, never by their names or their owners' text. */
+  function proMindPrompt(f, report) {
+    const kit = f.moves.map((m) => `- ${E.skillOf(f, m).name}: ${E.describeSkill(E.skillOf(f, m))}`).join("\n");
+    const pct = (x) => `${Math.round(x * 100)}%`;
+    const s = report.score;
+    const results = [
+      ...s.rivals.map((x) => `- vs rival ${x.label}: wins ${pct(x.rate)}`),
+      ...s.partners.map((x) => `- vs gym partner ${x.label}: wins ${pct(x.rate)}`),
+      ...s.arena.map((x, i) => `- vs arena fighter #${i + 1}: wins ${pct(x.rate)}`),
+      `- vs a field of other players' likely builds: wins ${pct(s.field)}`,
+    ].join("\n");
+    return [
+      `You write the mind of ${f.name}, a fighter in Fighter Lab, a turn-based game. A build optimizer just designed its loadout by simulating thousands of battles. In real battles you (Claude) choose each action, guided by a persona and a playbook. Write both so they make the most of this build.`,
+      "", RULES, "",
+      `FIGHTER: level ${f.level}. Stats: ${f.stats.power} Power, ${f.stats.vitality} Vitality, ${f.stats.speed} Speed. Skills:`, kit,
+      f.passive ? `Passive: ${E.describeSkill(f.passive).replace(/^Passive: /, "")}` : "No passive.",
+      f.item ? `Item: ${E.ITEMS[f.item].name} (${E.ITEMS[f.item].blurb})` : "No item.",
+      (f.rules || []).length ? `Battle rules it always follows (no need to repeat them):\n${f.rules.map((rl) => "- " + E.describeRule(rl, f)).join("\n")}` : "",
+      "", "WHY THE OPTIMIZER CHOSE THIS BUILD:", report.reasons.map((r) => "- " + r).join("\n"),
+      "", "SIMULATED RESULTS:", results, "",
+      `Persona: 1-2 sentences in the fighter's voice about its overall plan, under ${E.PERSONA_MAX} characters.`,
+      "Playbook: at most 8 lessons, one per line, each starting with \"- \". Name skills, energy timing, which style to answer with, and how to handle the hardest matchup. Under 700 characters.",
+      'Reply with only JSON: {"persona": "...", "playbook": "- lesson\\n- lesson", "comment": "<one sentence to the trainer on how to play this build>"}',
+    ].filter((x) => x !== "").join("\n");
+  }
+  function parseMind(reply) {
+    const coachPart = parseCoach(reply);
+    if (!coachPart) return null;
+    let obj = reply;
+    if (typeof reply === "string") { try { obj = JSON.parse(reply); } catch { return null; } }
+    const persona = E.cleanText(typeof obj.persona === "string" ? obj.persona : "", E.PERSONA_MAX, false).trim();
+    if (!persona) return null;
+    return { persona, playbook: coachPart.playbook, comment: coachPart.comment };
+  }
+  async function writeMind(sample, f, report, signal) {
+    const reply = await sample.json(proMindPrompt(f, report), { modelTier: "default", cache: false, ...(signal ? { signal } : {}) });
+    const out = parseMind(reply);
+    if (!out) throw { code: "invalid_reply", message: "Claude's answer couldn't be read." };
+    return out;
+  }
+
   return { turnPrompt, parseTurn, runAiBattle, draftPrompt, draftSkill, scoutPrompt, scout, coachPrompt, parseCoach, coach,
-           battleSummary, gymSummary, Cancelled, REASON_TEXT, STOP_CODES, TIERS };
+           proMindPrompt, parseMind, writeMind, battleSummary, gymSummary, Cancelled, REASON_TEXT, STOP_CODES, TIERS };
 });

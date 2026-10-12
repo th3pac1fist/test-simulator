@@ -1,7 +1,7 @@
 /* Fighter Lab app (rules v3): UI, storage, AI battles, skills forge, economy, rivals and the arena. */
 (() => {
   "use strict";
-  const E = window.FighterEngine, A = window.FighterAgent, SP = window.FighterSprites, ECON = window.FighterEconomy;
+  const E = window.FighterEngine, A = window.FighterAgent, SP = window.FighterSprites, ECON = window.FighterEconomy, OPT = window.FighterOptimizer;
   const $ = (id) => document.getElementById(id);
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -20,7 +20,8 @@
     coach: { busy: false, forId: null, comment: "", playbook: "", error: "", pending: null },
     rivalId: null, aiOn: true, overclock: false, scouting: {}, localOwner: null,
     ai: { sample: null, ready: false, off: false, reason: "" },
-    me: { id: null, user: null, canWrite: null },
+    me: { id: null, user: null, canWrite: null, owner: false },
+    pro: { status: "idle", forId: null, frac: 0, label: "", result: null, error: "", ctl: null, mind: null },
     arena: { db: null, docs: {}, raw: {}, results: {}, resultsRaw: {}, loaded: false, error: "", ratings: {} },
     store: { mode: "starting", pending: 0, failed: {}, slow: false, coll: null },
     battle: null, lastBattle: null, pendingChallenge: null,
@@ -184,6 +185,8 @@
     if (uid) claimLocal(uid);
     S.me.id = uid;
     if (user) user.can("data.write").then((v) => { S.me.canWrite = v; if (S.tab === "arena") render(); }, () => {});
+    // Pro build is for the game's owner only. This hides the UI; every viewer gets the same page code.
+    if (user) user.isOwner().then((v) => { S.me.owner = !!v; if (S.tab === "design") render(); }, () => {});
     if (db) startArena(db);
     if (!db || !uid) { setMode("local"); return; }
     S.store.coll = db.collection("data/users/" + uid);
@@ -481,6 +484,7 @@
         ${!S.fighters.length ? `<p class="note">A starting design. Change anything, then create your fighter.</p>` : ""}
       </div>
       <div class="panel">
+        ${editing && S.me.owner && OPT ? `<div class="box pro" id="pro-box">${proBoxHtml(editing)}</div>` : ""}
         <div class="box"><div class="field"><label for="f-name">Name</label>
           <input type="text" id="f-name" maxlength="16" value="${esc(d.name)}" autocomplete="off" spellcheck="false"></div></div>
         <div class="box">
@@ -504,7 +508,7 @@
         ${editing ? `<div class="box">
           <h2>Stats · ${points - used} of ${points} points free</h2>
           <p class="note">You get a point every level. Moving points you've already spent needs a reset (${ECON.PRICES.respec} Cycles).</p>
-          ${statRow("power", "Power", "+3% damage")}${statRow("vitality", "Vitality", "+4 HP")}${statRow("speed", "Speed", "acts first on ties")}
+          ${statRow("power", "Power", `+${Math.round(E.STAT_PCT.power * 100)}% damage`)}${statRow("vitality", "Vitality", `+${Math.round(E.STAT_PCT.vitality * 100)}% max HP`)}${statRow("speed", "Speed", `+${Math.round(E.STAT_PCT.speed * 100)}% dodge (max ${Math.round(E.STAT_PCT.dodgeCap * 100)}%), acts first on ties`)}
           ${!d.respec && (d.savedStats.power + d.savedStats.vitality + d.savedStats.speed) > 0 ? `<div class="row"><button class="btn" type="button" id="respec">Reset points · ${ECON.PRICES.respec} Cycles</button></div>` : ""}
         </div>` : ""}
         <div class="box">
@@ -594,6 +598,11 @@
         S.draft = null; S.editingId = null; S.tab = "roster"; render(); toast(`${name} deleted.`); return;
       }
       if (id === "save") saveDesign();
+      if (id === "pro-run") runPro();
+      if (id === "pro-cancel") { if (S.pro.ctl) S.pro.ctl.abort(); }
+      if (id === "pro-again") { S.pro = { ...S.pro, status: "idle", result: null, mind: null }; renderProBox(); }
+      if (id === "pro-apply") { applyPro(); rerender(); }
+      if (id === "pro-mind") await proMind(rerender);
     };
     v.onchange = (e) => {
       const t = e.target;
@@ -640,6 +649,149 @@
       if (t.dataset.trait) { d.personality[t.dataset.trait] = +t.value; $("tv-" + t.dataset.trait).textContent = Math.round(t.value * 100); }
     };
   }
+  // ---------- Pro build (owner only): the optimizer designs the best fair build ----------
+  const pct = (x) => `${Math.round(x * 100)}%`;
+  function proProbe(b) { return { custom: Object.fromEntries(b.skills.filter(Boolean).map((sk) => [sk.id, sk])), item: b.item }; }
+  function proBoxHtml(f) {
+    const P = S.pro, mine = P.forId === f.id;
+    const head = `<h2>Pro build · owner only</h2>`;
+    if (mine && P.status === "running") {
+      return `${head}<p class="small" style="margin:0"><span id="pro-label">${esc(P.label || "Starting")}</span> · <span id="pro-pct">${pct(P.frac)}</span></p>
+        <div class="meter"><span id="pro-bar" style="width:${Math.round(P.frac * 100)}%"></span></div>
+        <div class="row"><button class="btn" type="button" id="pro-cancel">Cancel</button></div>`;
+    }
+    if (mine && P.status === "done" && P.result) return head + proResultHtml(P.result);
+    return `${head}<p class="note" style="margin:0">Your AI simulates thousands of battles to find the strongest build ${esc(f.name)} can legally use at level ${f.level} with your ${balance()} Cycles: skills to forge, passive, item, stats and battle rules. It tests against your next rivals, the gym, arena fighters and a field of likely player builds. Takes about 20 seconds and uses no Claude.${aiUsable() ? ` It keeps ${ECON.PRICES.coach} Cycles aside so Claude can write the build's mind afterwards.` : ""}</p>
+      ${mine && P.error ? `<p class="warn" style="margin:0">${esc(P.error)}</p>` : ""}
+      <div class="row"><button class="btn primary" type="button" id="pro-run">Find the best build</button></div>`;
+  }
+  function proResultHtml(r) {
+    const b = r.build, probe = proProbe(b), s = r.score, base = r.baseline;
+    const afford = b.cost <= balance();
+    const skills = b.moves.map((m, i) => {
+      const sk = b.skills[i] || E.BASIC[m], fx = b.forge.find((x) => x.ref === m);
+      return `<li style="--c:${STYLE_VAR[sk.style]}"><b>${esc(sk.name)}</b> <span class="tag">${E.STYLE_INFO[sk.style].label.toUpperCase()}</span>${fx ? ` <span class="tag next">FORGE · ${fx.cost}</span>` : ""}<span class="note">${esc(E.describeSkill(sk))}</span></li>`;
+    }).join("");
+    const pf = b.passive && b.forge.find((x) => x.ref === b.passive.id);
+    const rows = [
+      ...s.rivals.map((x, i) => [`vs ${x.label}`, x.rate, (base.rivals[i] || {}).rate]),
+      ["vs gym partners", avg(s.partners), avg(base.partners)],
+      ...(s.arena.length ? [["vs arena fighters", avg(s.arena), avg(base.arena)]] : []),
+      ["vs likely player builds", s.field, base.field],
+    ];
+    const rates = rows.map(([label, now, was]) => `<li><span>${esc(label)}</span><b>${pct(now)}</b><span class="note">${was === undefined || was === null ? "" : `now ${pct(was)}`}</span></li>`).join("");
+    const path = r.path.map((p) => `<li><b>Level ${p.level}</b> (power limit ${p.cap}): ${p.forge.length ? p.forge.map((x) => x.upgrade ? `re-forge ${esc(x.name)} stronger (${x.was} → ${x.budget}, ${x.cost} Cycles)` : `forge ${esc(x.name)} to replace ${esc(x.replaces)} (${x.cost} Cycles)`).join("; ") : "keep the build"}. Stats ${p.stats.power}/${p.stats.vitality}/${p.stats.speed}. Aim for ${esc(p.rival)}.</li>`).join("");
+    const mind = S.pro.mind;
+    return `<div class="outcome">Score ${Math.round(s.overall * 100)} <span class="note">vs ${Math.round(base.overall * 100)} with the current build</span></div>
+      ${r.keptCurrent ? `<p class="small" style="margin:0">Your current build is already the best one found. Nothing to change.</p>` : ""}
+      <ul class="pro-skills">${skills}</ul>
+      <p class="small" style="margin:0"><b>Passive:</b> ${b.passive ? `${esc(b.passive.name)}${pf ? ` <span class="tag next">FORGE · ${pf.cost}</span>` : ""} · ${esc(E.describeSkill(b.passive).replace(/^Passive: /, ""))}` : "none"}
+        · <b>Item:</b> ${b.item ? `${E.ITEMS[b.item].name}${b.buyItem ? ` (buy · ${ECON.itemPrice(b.item)})` : " (owned)"}` : "none"}
+        · <b>Stats:</b> ${b.stats.power} Power, ${b.stats.vitality} Vitality, ${b.stats.speed} Speed${b.respec ? ` (needs a reset · ${ECON.PRICES.respec})` : ""}</p>
+      ${b.rules.length ? `<p class="small" style="margin:0"><b>Rules:</b> ${b.rules.map((rl) => esc(E.describeRule(rl, probe))).join(" ")}</p>` : ""}
+      <ul class="pro-rates">${rates}</ul>
+      <ul class="pro-why">${r.reasons.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+      <p class="small" style="margin:0"><b>Training:</b> ${r.training.map((t) => esc(t.tip)).join(" ")}</p>
+      ${r.saveUpFor ? `<p class="small" style="margin:0"><b>Save up for:</b> ${r.saveUpFor.build.names.map(esc).join(", ")} (${r.saveUpFor.build.cost} Cycles, score ${Math.round(r.saveUpFor.score.overall * 100)}).</p>` : ""}
+      ${path ? `<div><span class="lab">Level-up path</span><ul class="pro-path">${path}</ul></div>` : ""}
+      ${mind && mind.comment ? `<p class="small" style="margin:0"><b>Claude:</b> ${esc(mind.comment)}</p>` : ""}
+      ${mind && mind.error ? `<p class="warn" style="margin:0">${esc(mind.error)}</p>` : ""}
+      <div class="row">
+        ${r.keptCurrent ? "" : `<button class="btn primary" type="button" id="pro-apply" ${afford && !S.pro.applied ? "" : "disabled"}>${S.pro.applied ? "Applied: review and Save" : `Apply to draft · ${b.cost} Cycles`}</button>`}
+        <button class="btn" type="button" id="pro-mind" ${aiUsable() && !(mind && mind.busy) ? "" : "disabled"}>${mind && mind.busy ? "Writing…" : `Write its mind with Claude · ${ECON.PRICES.coach} Cycles`}</button>
+        <button class="btn" type="button" id="pro-again">Run again</button>
+      </div>
+      ${afford || r.keptCurrent ? "" : `<p class="warn" style="margin:0">You need ${b.cost} Cycles; you have ${balance()}.</p>`}`;
+  }
+  const avg = (xs) => (xs.length ? xs.reduce((a, x) => a + x.rate, 0) / xs.length : 0);
+  function renderProBox() { const box = $("pro-box"), f = S.editingId && find(S.editingId); if (box && f) box.innerHTML = proBoxHtml(f); }
+  async function runPro() {
+    const f = S.editingId && find(S.editingId);
+    if (!f || S.pro.status === "running") return;
+    const ctl = new AbortController();
+    S.pro = { status: "running", forId: f.id, frac: 0, label: "Starting", result: null, error: "", ctl, mind: null, applied: false };
+    renderProBox();
+    const arena = [];
+    for (const [owner, list] of Object.entries(S.arena.docs || {})) if (owner !== S.me.id) arena.push(...list);
+    let last = 0;
+    try {
+      const result = await OPT.optimize({
+        // keep enough for Claude to write the build's mind afterwards
+        fighter: f, library: S.progress.library, inventory: S.progress.inventory, balance: Math.max(0, balance() - (aiUsable() ? ECON.PRICES.coach : 0)), beaten: S.progress.beaten,
+        arena, seed: E.hash(`${f.id}:${f.rev || 0}`), signal: ctl.signal,
+        onProgress: (frac, label) => {
+          S.pro.frac = frac; S.pro.label = label;
+          const now = Date.now(); if (now - last < 120 && frac < 1) return; last = now;
+          const bar = $("pro-bar"), lab = $("pro-label"), pc = $("pro-pct");
+          if (bar) bar.style.width = Math.round(frac * 100) + "%"; if (lab) lab.textContent = label; if (pc) pc.textContent = pct(frac);
+        },
+      });
+      S.pro = { ...S.pro, status: "done", result, ctl: null };
+    } catch (e) {
+      S.pro = { ...S.pro, status: "idle", ctl: null, error: e && e.code === "cancelled" ? "Cancelled." : "The search failed. Try again." };
+      if (!(e && e.code === "cancelled")) console.error(e);
+    }
+    renderProBox();
+  }
+  /** Forge, buy and pay for the build, then load it into the draft. The player still presses Save. */
+  function applyPro() {
+    const r = S.pro.result, d = S.draft, f = S.editingId && find(S.editingId);
+    if (!r || !d || !f || S.pro.applied || S.pro.forId !== f.id) return;
+    const b = r.build;
+    if (b.cost > balance()) { toast(`This build costs ${b.cost} Cycles; you have ${balance()}.`); return; }
+    if (S.progress.library.length + b.forge.length > LIBRARY_MAX) { toast(`Your library holds ${LIBRARY_MAX} skills. Delete some first.`); return; }
+    const ids = {};
+    for (const x of b.forge) {
+      if (!pay(x.cost, `Forged ${x.skill.name}`)) return;
+      const skill = { ...E.clone(x.skill), id: E.newId(Math.random, "sk_") };
+      ids[x.ref] = skill.id;
+      S.progress.library.push(skill);
+    }
+    if (b.buyItem) { if (!pay(ECON.itemPrice(b.item), `Bought ${E.ITEMS[b.item].name}`)) return; S.progress.inventory[b.item] = (S.progress.inventory[b.item] || 0) + 1; }
+    if (b.respec) { if (!pay(ECON.PRICES.respec, `Stat reset for ${d.name}`)) return; d.respec = true; }
+    const id = (m) => ids[m] || m;
+    d.moves = b.moves.map(id);
+    d.custom = {};
+    b.moves.forEach((m, i) => {
+      const sk = b.skills[i];
+      if (!sk) return;
+      const lib = S.progress.library.find((s) => s.id === id(m));
+      d.custom[id(m)] = E.clone(lib || { ...sk, id: id(m) });
+    });
+    d.passive = b.passive ? E.clone({ ...b.passive, id: id(b.passive.id) }) : null;
+    d.item = b.item;
+    d.stats = { ...b.stats };
+    d.rules = b.rules.map((rl) => (rl.do.skill ? { ...rl, do: { skill: id(rl.do.skill) } } : E.clone(rl)));
+    if (S.pro.mind && S.pro.mind.persona) { d.persona = S.pro.mind.persona; d.playbook = S.pro.mind.playbook; }
+    S.pro.applied = true;
+    saveProgress();
+    toast("Pro build loaded into the draft. Review it, then press Save.");
+  }
+  async function proMind(rerender) {
+    const r = S.pro.result, f = S.editingId && find(S.editingId), d = S.draft;
+    if (!r || !f || !d || (S.pro.mind && S.pro.mind.busy)) return;
+    if (!aiUsable()) { toast("This needs Claude, which isn't available right now."); return; }
+    if (!pay(ECON.PRICES.coach, `Pro build mind for ${f.name}`)) return;
+    S.pro.mind = { busy: true };
+    renderProBox();
+    const b = r.build, custom = {};
+    b.moves.forEach((m, i) => { if (b.skills[i]) custom[m] = b.skills[i]; });
+    let preview = E.redesign(f, { moves: b.moves, custom, passive: b.passive, item: b.item });
+    preview = E.setStats({ ...preview, stats: { power: 0, vitality: 0, speed: 0 } }, b.stats);
+    preview.rules = E.sanitizeRules(b.rules, preview.moves);
+    try {
+      const out = await A.writeMind(S.ai.sample, preview, r);
+      S.pro.mind = { ...out, busy: false };
+      d.persona = out.persona; d.playbook = out.playbook;
+      toast("Persona and playbook written into the draft.");
+    } catch (e) {
+      noteAiError(e && e.code);
+      earn(ECON.PRICES.coach, "Refund: Pro build mind failed");
+      S.pro.mind = { busy: false, error: "Claude couldn't write it this time. You weren't charged." };
+    }
+    if (S.tab === "design" && S.draft === d) rerender(); else renderProBox();
+  }
+
   function saveDesign() {
     const d = S.draft, name = d.name.trim().toUpperCase();
     try {
@@ -1332,7 +1484,7 @@
     const li = document.createElement("li");
     const eff = a.effect === "super" ? " · super effective" : a.effect === "resisted" ? " · resisted" : "";
     const src = a.source === "ai" ? ["ai", "AI"] : a.source === "rule" ? ["rule", "RULE"] : a.source === "you" ? ["you", "YOU"] : ["", "INSTINCT"];
-    const what = a.stunned ? "stunned" : a.fizzled ? "no energy" : a.kind === "item" ? `item${a.healed ? ` +${a.healed} HP` : ""}` : a.kind === "rest" ? "rest" : `−${(a.points || 0).toFixed(1)} HP${eff}`;
+    const what = a.stunned ? "stunned" : a.fizzled ? "no energy" : a.dodged ? "dodged" : a.kind === "item" ? `item${a.healed ? ` +${a.healed} HP` : ""}` : a.kind === "rest" ? "rest" : `−${(a.points || 0).toFixed(1)} HP${eff}`;
     const extra = [a.applied.length ? a.applied.join(", ") : "", a.healed && a.kind === "skill" ? `+${a.healed} HP` : "", a.absorbed ? `${a.absorbed} blocked` : "", a.reflected ? `${a.reflected} reflected` : ""].filter(Boolean).join(" · ");
     li.innerHTML = `<span class="t">T${String(turn).padStart(2, "0")}</span><span class="chip" style="--c:${a.style ? STYLE_VAR[a.style] : "var(--muted)"}">${esc(a.name)}</span>
       <span class="who">${esc(a.agent_name)} <span class="src ${src[0]}">${src[1]}</span></span>
@@ -1430,6 +1582,7 @@
       }
       if (a.kind === "rest") { await say(b, `${a.agent_name} rests to recover energy.`, 350); logLine(t.turn, a); continue; }
       if (a.fizzled) { await say(b, `${a.agent_name} doesn't have the energy for ${a.name}!`, 450); logLine(t.turn, a); continue; }
+      if (a.dodged) { await say(b, `${a.agent_name} used ${a.name}, but it was dodged!`, 450); logLine(t.turn, a); continue; }
       const sk = a.kind === "skill" ? E.skillOf({ custom: {} }, a.skill) || { fx: "burst", color: "#c8402a" } : { fx: "burst" };
       await say(b, `${a.agent_name} used ${a.name}!`, 200);
       logLine(t.turn, a);

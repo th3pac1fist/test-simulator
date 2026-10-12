@@ -78,7 +78,7 @@ The creatures, move names and art are original to this project. The page only bo
 - **A fighter** is made of:
   - a look;
   - a **loadout**: 4 skills, 1 passive and 1 held item;
-  - **stats**: a point per level for Power, Vitality or Speed;
+  - **stats**: a point per level for Power (+3% damage), Vitality (+4% max HP) or Speed (+2% chance to dodge an attack, up to 40%);
   - up to 4 **battle rules** (if-then, like Gladiabots);
   - a **persona** you write ("how it thinks");
   - a **playbook** of lessons, written by an AI coach;
@@ -91,7 +91,8 @@ The creatures, move names and art are original to this project. The page only bo
   - **Cooldowns** on strong skills.
   - **Statuses:** burn, poison, stun (followed by a turn of stun immunity), shield, regen, weaken and focus.
   - **Turn order:** priority skills first, then the faster fighter.
-  - **Items** (one use per battle): Potion, Ether, Antidote, Smoke Bomb.
+  - **Items** (one use per battle): Potion (heals 15% of max HP), Ether, Antidote, Smoke Bomb.
+  - **Scaling:** shields, heals, burn and poison grow with level, like damage.
   - **Length:** 12 turns or a knockout.
 - **Skill files:** a skill is JSON made from a fixed set of effects, so it always makes sense:
   ```json
@@ -112,6 +113,34 @@ The creatures, move names and art are original to this project. The page only bo
     - forging, items, stat resets.
   - **Ledger:** append-only, and the balance can't go negative.
   - **No cash value:** Cycles can't be transferred. [`docs/CRYPTO.md`](docs/CRYPTO.md) is the plan for a real token later.
+- **Balance, checked by simulation** (`engine.test.mjs`, `optimizer.test.mjs`):
+  - Power, Vitality and Speed are all percentages, so they're worth about the same at levels 4, 15 and 35.
+  - The Potion helps about as much as the Smoke Bomb.
+  - Effect prices (`PRICE` in `engine.js`) are calibrated so forged skills of equal power win about equally often. Shields are strongest early on and weaken effects late in the game.
+- **Pro build** (`optimizer.js`, owner only):
+  - **Who sees it:** the artifact's owner (`user.isOwner()`) gets a Pro build box in the Design tab. It only hides the UI: every viewer gets the same page code. The builds it makes are legal anyway, and arena skills are re-checked when they arrive.
+  - **What it can use:** only what's legal at the fighter's level and affordable with your Cycles:
+    - basic and owned skills;
+    - skills to forge, from archetypes scaled to your power limit;
+    - passives, items paired with matching rules, and stat splits.
+  - **How it searches:** in stages:
+    1. Screen every loadout covering the four styles.
+    2. Try forged skills one slot at a time, then combine the best.
+    3. Add a passive, an item with rules, stats and a finisher rule.
+    4. Run finals with several seeds.
+  - **What it tests against:**
+    - your next rivals;
+    - the gym partners;
+    - published arena fighters, shown to Claude only by number;
+    - a field of random legal builds standing in for other players;
+    - a round-robin among the finalists.
+  - **What you get:**
+    - win rates against the current build;
+    - reasons;
+    - training tips;
+    - a level-up path: what to forge or re-forge at each milestone.
+  - **Apply:** forges and buys through the normal Cycles flow and fills the Design form; you press Save.
+  - **Write its mind:** Claude writes a persona and playbook for the build (5 Cycles).
 - **Getting stronger:**
   - **Gym practice** is instant and uses no Claude. It builds XP and levels (capped at 50), skill mastery (up to +50%) and instincts.
   - **Spar by hand:** you choose every action, and the instincts learn by copying you (imitation learning, as in AI Arena).
@@ -133,6 +162,7 @@ The creatures, move names and art are original to this project. The page only bo
 - **Code:**
   - `engine.js`: rules, skills and pricing, instincts, training, rivals, arena helpers; no DOM.
   - `economy.js`: the Cycles ledger, prices and rewards.
+  - `optimizer.js`: the Pro build search; no DOM.
   - `agent.js`: prompts, reply parsing, the AI battle runner, skill drafts, scouting and the coach. It takes a `sample` function, so tests can pass in a fake.
   - `sprites.js`: the pixel creatures.
   - `app.js`: the UI.
