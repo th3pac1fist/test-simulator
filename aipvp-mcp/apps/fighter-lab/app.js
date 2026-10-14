@@ -12,7 +12,7 @@
   const PERMANENT_AI_CODES = new Set(["not_granted", "sampling_disabled", "not_declared", "capability_disabled", "capability_removed"]);
 
   // ---------- state ----------
-  const newProgress = () => ({ beaten: [], rev: 0, wallet: ECON.newWallet(), library: [], inventory: {} });
+  const newProgress = () => ({ beaten: [], rev: 0, wallet: ECON.newWallet(), library: [], inventory: {}, codex: [] });
   const S = {
     fighters: [], deleted: [], progress: newProgress(),
     activeId: null, tab: "design", draft: null, editingId: null, confirmDelete: false,
@@ -30,6 +30,15 @@
   const active = () => S.fighters.find((f) => f.id === S.activeId) || null;
   const find = (id) => S.fighters.find((f) => f.id === id) || null;
   const skillName = (f, id) => (E.skillOf(f, id) || {}).name || id;
+  const unlocked = () => E.unlockedFamilies(S.progress);
+  const KIND_LABEL = { active: "SKILL", passive: "PASSIVE", weapon: "WEAPON" };
+  /** "In training 12/50 uses" or "Battle-ready" for one file on one fighter. */
+  function practiceTag(f, file) {
+    if (!f || !file || E.practiceNeeded(file) === 0) return "";
+    if (E.isProven(f, file)) return `<span class="tag won">BATTLE-READY</span>`;
+    const have = E.practiceCount(f, file), need = E.practiceNeeded(file);
+    return `<span class="tag next">IN TRAINING ${Math.min(have, need)}/${need} ${file.kind === "active" ? "uses" : "battles"}</span>`;
+  }
 
   // ---------- progress (wallet, skill library, items): validated on every load ----------
   function sanitizeProgress(raw) {
@@ -38,7 +47,14 @@
     p.beaten = Array.isArray(raw.beaten) ? raw.beaten.filter((x) => E.RIVALS.some((r) => r.id === x)) : [];
     p.rev = Number.isFinite(raw.rev) ? raw.rev : 0;
     p.wallet = ECON.sanitizeWallet(raw.wallet);
-    p.library = (Array.isArray(raw.library) ? raw.library : []).slice(0, LIBRARY_MAX).map((s) => E.validateSkill(s).skill).filter(Boolean);
+    p.library = (Array.isArray(raw.library) ? raw.library : []).slice(0, LIBRARY_MAX).map((s) => {
+      const v = E.validateSkill(s).skill;
+      if (!v) return null;
+      const out = { ...v, id: typeof s.id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(s.id) ? s.id : v.id };
+      if (s.from === "drop") { out.from = "drop"; out.rarity = ["common", "rare", "epic"].includes(s.rarity) ? s.rarity : "common"; }
+      return out;
+    }).filter(Boolean);
+    p.codex = Array.isArray(raw.codex) ? [...new Set(raw.codex.filter((k) => typeof k === "string" && E.FAMILIES[k]))] : [];
     const inv = raw.inventory && typeof raw.inventory === "object" ? raw.inventory : {};
     p.inventory = Object.fromEntries(Object.keys(E.ITEMS).map((k) => [k, Math.max(0, Math.min(99, Math.round(Number(inv[k]) || 0)))]));
     return p;
@@ -415,12 +431,12 @@
     S.editingId = f ? f.id : null;
     S.confirmDelete = false;
     S.draft = f ? { name: f.name, design: { ...f.design }, personality: { ...f.personality }, moves: f.moves.slice(), custom: E.clone(f.custom || {}),
-                    persona: f.persona || "", playbook: f.playbook || "", passive: f.passive ? E.clone(f.passive) : null, item: f.item || null,
+                    persona: f.persona || "", playbook: f.playbook || "", passive: f.passive ? E.clone(f.passive) : null, item: f.item || null, weapon: f.weapon ? E.clone(f.weapon) : null,
                     stats: { ...E.statsOf(f) }, savedStats: { ...E.statsOf(f) }, respec: false, rules: E.clone(f.rules || []), level: f.level }
       : { name: NAMES[Math.floor(Math.random() * NAMES.length)], design: randomDesign(), custom: {},
           personality: { aggression: 0.6, caution: 0.5, creativity: 0.5, loyalty: 0.4 }, moves: ["fight", "talk", "strategize", "shield"],
           persona: "Reads the opponent for a turn, then hits the counter hard. Saves energy for big moves in the endgame.", playbook: "",
-          passive: null, item: null, stats: { power: 0, vitality: 0, speed: 0 }, savedStats: { power: 0, vitality: 0, speed: 0 }, respec: false, rules: [], level: 1 };
+          passive: null, item: null, weapon: null, stats: { power: 0, vitality: 0, speed: 0 }, savedStats: { power: 0, vitality: 0, speed: 0 }, respec: false, rules: [], level: 1 };
   }
   const TRAIT_HELP = { aggression: "Starts out favoring Aggro skills.", caution: "Starts out favoring Guard skills.", creativity: "Starts out favoring Mind skills.", loyalty: "Starts out favoring Social skills." };
   /** Every skill the draft could equip: basics, then library skills (with whether the level allows them). */
@@ -441,9 +457,24 @@
     const cur = d.moves[i];
     const opts = (group, list) => list.length ? `<optgroup label="${group}">${list.map((p) => `<option value="${esc(p.id)}" ${p.id === cur ? "selected" : ""} ${(!p.ok || (d.moves.includes(p.id) && p.id !== cur)) ? "disabled" : ""}>${esc(p.skill.name)} · ${E.STYLE_INFO[p.skill.style].label} · ${p.skill.energy}E${p.ok ? "" : " (needs a higher level)"}</option>`).join("")}</optgroup>` : "";
     const sk = E.skillOf({ custom: d.custom }, cur);
-    return `<div class="slot" style="--c:${STYLE_VAR[sk.style]}"><label class="lab" for="slot-${i}">Slot ${i + 1}</label>
+    const editing = S.editingId && find(S.editingId);
+    return `<div class="slot" style="--c:${STYLE_VAR[sk.style]}"><label class="lab" for="slot-${i}">Slot ${i + 1} ${sk.basic ? "" : practiceTag(editing || { uses: {}, proven: [] }, sk)}</label>
       <select id="slot-${i}" data-slot="${i}">${opts("Basic", pool.filter((p) => !p.custom))}${opts("Your skills", pool.filter((p) => p.custom))}</select>
       <span class="note">${esc(E.describeSkill(sk))}</span></div>`;
+  }
+  function weaponOptions(d) {
+    const list = S.progress.library.filter((s) => s.kind === "weapon");
+    if (d.weapon && !list.some((w) => w.id === d.weapon.id)) list.unshift(d.weapon);
+    const cur = d.weapon ? d.weapon.id : "";
+    return `<option value="">None</option>` + list.map((w) => {
+      const ok = w.budget <= E.maxWeaponBudget(d.level);
+      return `<option value="${esc(w.id)}" ${w.id === cur ? "selected" : ""} ${ok ? "" : "disabled"}>${esc(w.name)}${ok ? "" : " (needs a higher level)"}</option>`;
+    }).join("");
+  }
+  /** The rulebook's loadout clauses, shown before Save. */
+  function clauseNote(d) {
+    const errs = E.validateLoadout({ moves: d.moves, custom: d.custom, passive: d.passive, weapon: d.weapon });
+    return errs.length ? `<p class="warn" id="clause-warn">${errs.map(esc).join(" ")} Change a skill to save.</p>` : "";
   }
   function passiveOptions(d) {
     const list = [...E.STARTER_PASSIVES.map((p) => ({ p, starter: true })), ...S.progress.library.filter((s) => s.kind === "passive").map((p) => ({ p }))];
@@ -475,7 +506,7 @@
     const statRow = (k, label, help) => `<div class="stat-row"><span><b>${label}</b> <span class="note">${help}</span></span>
       <span class="stepper"><button class="btn icon" type="button" data-stat="${k}" data-d="-1" aria-label="Less ${label}" ${d.stats[k] <= (d.respec ? 0 : d.savedStats[k]) ? "disabled" : ""}>−</button>
       <b class="num">${d.stats[k]}</b><button class="btn icon" type="button" data-stat="${k}" data-d="1" aria-label="More ${label}" ${used >= points ? "disabled" : ""}>+</button></span></div>`;
-    const canSave = d.name.trim() && new Set(d.moves).size === 4;
+    const canSave = d.name.trim() && new Set(d.moves).size === 4 && !E.validateLoadout({ moves: d.moves, custom: d.custom, passive: d.passive, weapon: d.weapon }).length;
     v.innerHTML = `<div class="two">
       <div class="box">
         <h2>${editing ? "Edit fighter" : "New fighter"}</h2>
@@ -492,9 +523,12 @@
           <p class="note">Four skills. Each style beats the next: Aggro → Social → Mind → Guard → Aggro. Forge new skills in the Forge tab.</p>
           <div class="slots">${[0, 1, 2, 3].map((i) => slotHtml(d, i, pool)).join("")}</div>
           ${coverageNote(d)}
+          ${clauseNote(d)}
           <div class="grid2">
             <div class="field"><label class="lab" for="f-passive">Passive</label><select id="f-passive">${passiveOptions(d)}</select>
               <span class="note">${d.passive ? esc(E.describeSkill(d.passive)) : "Always-on bonus, like regenerating HP. Starters are free."}</span></div>
+            ${unlocked().has("weapon:slot") || d.weapon ? `<div class="field"><label class="lab" for="f-weapon">Weapon</label><select id="f-weapon">${weaponOptions(d)}</select>
+              <span class="note">${d.weapon ? esc(E.describeSkill(d.weapon)) : "Always on: it changes how your attacks land. Forge one in the Forge tab."} ${d.weapon && editing ? practiceTag(editing, d.weapon) : ""}</span></div>` : ""}
             <div class="field"><label class="lab" for="f-item">Item (one use per battle)</label><select id="f-item">${itemOpts}</select>
               <span class="note">${d.item ? esc(E.ITEMS[d.item].blurb) : "Buy items in the Forge tab."} Using it takes your turn but acts first.</span></div>
           </div>
@@ -620,6 +654,10 @@
         rerender(); return;
       }
       if (t.id === "f-item") { d.item = t.value || null; rerender(); return; }
+      if (t.id === "f-weapon") {
+        const w = S.progress.library.find((x) => x.id === t.value) || (d.weapon && d.weapon.id === t.value ? d.weapon : null);
+        d.weapon = t.value && w ? E.clone(w) : null; rerender(); return;
+      }
       if (t.dataset.ruleCond !== undefined) {
         const r = d.rules[+t.dataset.ruleCond], def = E.RULE_CONDITIONS[t.value];
         r.when = { kind: t.value, value: def.value[0] === undefined ? 0 : typeof def.value[0] === "string" ? def.value[0] : Math.round((def.value[0] + def.value[1]) / 2 / def.value[2]) * def.value[2] };
@@ -680,18 +718,20 @@
       ["vs likely player builds", s.field, base.field],
     ];
     const rates = rows.map(([label, now, was]) => `<li><span>${esc(label)}</span><b>${pct(now)}</b><span class="note">${was === undefined || was === null ? "" : `now ${pct(was)}`}</span></li>`).join("");
-    const path = r.path.map((p) => `<li><b>Level ${p.level}</b> (power limit ${p.cap}): ${p.forge.length ? p.forge.map((x) => x.upgrade ? `re-forge ${esc(x.name)} stronger (${x.was} → ${x.budget}, ${x.cost} Cycles)` : `forge ${esc(x.name)} to replace ${esc(x.replaces)} (${x.cost} Cycles)`).join("; ") : "keep the build"}. Stats ${p.stats.power}/${p.stats.vitality}/${p.stats.speed}. Aim for ${esc(p.rival)}.</li>`).join("");
+    const path = r.path.map((p) => `<li><b>Level ${p.level}</b> (power limit ${p.cap}): ${(p.badges || []).map((x) => `beat ${esc(x.rival)} for ${esc(x.unlocks.join(", "))}; `).join("")}${p.forge.length ? p.forge.map((x) => x.upgrade ? `re-forge ${esc(x.name)} stronger (${x.was} → ${x.budget}, ${x.cost} Cycles)` : `forge ${esc(x.name)} to replace ${esc(x.replaces)} (${x.cost} Cycles)`).join("; ") : "keep the build"}. Stats ${p.stats.power}/${p.stats.vitality}/${p.stats.speed}. Aim for ${esc(p.rival)}.</li>`).join("");
     const mind = S.pro.mind;
     return `<div class="outcome">Score ${Math.round(s.overall * 100)} <span class="note">vs ${Math.round(base.overall * 100)} with the current build</span></div>
       ${r.keptCurrent ? `<p class="small" style="margin:0">Your current build is already the best one found. Nothing to change.</p>` : ""}
       <ul class="pro-skills">${skills}</ul>
       <p class="small" style="margin:0"><b>Passive:</b> ${b.passive ? `${esc(b.passive.name)}${pf ? ` <span class="tag next">FORGE · ${pf.cost}</span>` : ""} · ${esc(E.describeSkill(b.passive).replace(/^Passive: /, ""))}` : "none"}
+        ${b.weapon ? `· <b>Weapon:</b> ${esc(b.weapon.name)}${b.forge.some((x) => x.ref === b.weapon.id) ? ` <span class="tag next">FORGE · ${b.forge.find((x) => x.ref === b.weapon.id).cost}</span>` : ""} · ${esc(E.describeSkill(b.weapon).replace(/^Weapon: /, ""))}` : ""}
         · <b>Item:</b> ${b.item ? `${E.ITEMS[b.item].name}${b.buyItem ? ` (buy · ${ECON.itemPrice(b.item)})` : " (owned)"}` : "none"}
         · <b>Stats:</b> ${b.stats.power} Power, ${b.stats.vitality} Vitality, ${b.stats.speed} Speed${b.respec ? ` (needs a reset · ${ECON.PRICES.respec})` : ""}</p>
       ${b.rules.length ? `<p class="small" style="margin:0"><b>Rules:</b> ${b.rules.map((rl) => esc(E.describeRule(rl, probe))).join(" ")}</p>` : ""}
       <ul class="pro-rates">${rates}</ul>
       <ul class="pro-why">${r.reasons.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
       <p class="small" style="margin:0"><b>Training:</b> ${r.training.map((t) => esc(t.tip)).join(" ")}</p>
+      ${(r.practice || []).length ? `<p class="small" style="margin:0"><b>Practice before battles:</b> ${r.practice.map((x) => `${esc(x.name)}: ${x.need} ${x.kind === "active" ? "uses, about " + x.rounds + " drill rounds" : "practice battles"}`).join("; ")}.</p>` : ""}
       ${r.saveUpFor ? `<p class="small" style="margin:0"><b>Save up for:</b> ${r.saveUpFor.build.names.map(esc).join(", ")} (${r.saveUpFor.build.cost} Cycles, score ${Math.round(r.saveUpFor.score.overall * 100)}).</p>` : ""}
       ${path ? `<div><span class="lab">Level-up path</span><ul class="pro-path">${path}</ul></div>` : ""}
       ${mind && mind.comment ? `<p class="small" style="margin:0"><b>Claude:</b> ${esc(mind.comment)}</p>` : ""}
@@ -718,6 +758,7 @@
       const result = await OPT.optimize({
         // keep enough for Claude to write the build's mind afterwards
         fighter: f, library: S.progress.library, inventory: S.progress.inventory, balance: Math.max(0, balance() - (aiUsable() ? ECON.PRICES.coach : 0)), beaten: S.progress.beaten,
+        codex: S.progress.codex, unlocked: unlocked(),
         arena, seed: E.hash(`${f.id}:${f.rev || 0}`), signal: ctl.signal,
         onProgress: (frac, label) => {
           S.pro.frac = frac; S.pro.label = label;
@@ -759,6 +800,7 @@
       d.custom[id(m)] = E.clone(lib || { ...sk, id: id(m) });
     });
     d.passive = b.passive ? E.clone({ ...b.passive, id: id(b.passive.id) }) : null;
+    d.weapon = b.weapon ? E.clone({ ...b.weapon, id: id(b.weapon.id) }) : null;
     d.item = b.item;
     d.stats = { ...b.stats };
     d.rules = b.rules.map((rl) => (rl.do.skill ? { ...rl, do: { skill: id(rl.do.skill) } } : E.clone(rl)));
@@ -776,7 +818,7 @@
     renderProBox();
     const b = r.build, custom = {};
     b.moves.forEach((m, i) => { if (b.skills[i]) custom[m] = b.skills[i]; });
-    let preview = E.redesign(f, { moves: b.moves, custom, passive: b.passive, item: b.item });
+    let preview = E.redesign(f, { moves: b.moves, custom, passive: b.passive, item: b.item, weapon: b.weapon });
     preview = E.setStats({ ...preview, stats: { power: 0, vitality: 0, speed: 0 } }, b.stats);
     preview.rules = E.sanitizeRules(b.rules, preview.moves);
     try {
@@ -797,8 +839,10 @@
     try {
       const editing = S.editingId && find(S.editingId);
       let f = editing
-        ? E.redesign(editing, { name, design: d.design, personality: d.personality, moves: d.moves, custom: d.custom, passive: d.passive, item: d.item })
-        : E.upgradeFighter(E.createFighter({ name, design: d.design, personality: d.personality, moves: d.moves, custom: d.custom, passive: d.passive, item: d.item }));
+        ? E.redesign(editing, { name, design: d.design, personality: d.personality, moves: d.moves, custom: d.custom, passive: d.passive, item: d.item, weapon: d.weapon })
+        : E.upgradeFighter(E.createFighter({ name, design: d.design, personality: d.personality, moves: d.moves, custom: d.custom, passive: d.passive, item: d.item, weapon: d.weapon }));
+      const broken = E.validateLoadout(f);
+      if (broken.length) throw new Error(broken.join(" "));
       if (editing) f = E.setStats(f, d.stats);
       f.rules = E.sanitizeRules(d.rules, f.moves);
       f.persona = E.cleanText(d.persona, E.PERSONA_MAX, false);
@@ -813,20 +857,33 @@
   // ---------- forge: build or describe a skill; wallet; library; shop ----------
   function forgeLevel() { return active()?.level || 1; }
   function resetForge(kind = "active") {
-    // Defaults are the two examples from the design brief: a fireball that burns, and a passive that heals every two turns.
-    S.forge = { mode: "build", kind, name: kind === "passive" ? "LIFE BLOOM" : "FIREBALL", style: kind === "passive" ? "guard" : "aggro", element: kind === "passive" ? "spirit" : "fire",
-                effects: kind === "passive" ? [{ type: "regen", heal: 1, every: 2 }] : [{ type: "damage", power: 3, hits: 1 }, { type: "burn", chance: 0.3, damage: 2, turns: 3 }],
+    // Defaults are the examples from the design brief: a fireball that burns, a passive that heals every two turns,
+    // and a flame sword whose Aggro skills can burn.
+    const D = {
+      active: { name: "FIREBALL", style: "aggro", element: "fire", effects: [{ type: "damage", power: 3, hits: 1 }, { type: "burn", chance: 0.3, damage: 2, turns: 3 }] },
+      passive: { name: "LIFE BLOOM", style: "guard", element: "spirit", effects: [{ type: "regen", heal: 1, every: 2 }] },
+      weapon: { name: "FLAME SWORD", style: "aggro", element: "fire", effects: [{ type: "rider", style: "aggro", status: "burn", chance: 0.2 }, { type: "edge", style: "aggro", pct: 0.1 }] },
+    }[kind] || null;
+    S.forge = { mode: "build", kind, name: D.name, style: D.style, element: D.element, effects: D.effects,
                 cheaper: 0, desc: "", why: "", note: "", busy: false };
   }
   /** Fill parameters a skill file left out (damage without "hits" means one hit) so every slider has a value. */
   function withDefaults(e, kind) {
-    const def = (kind === "passive" ? E.PASSIVE_EFFECTS : E.EFFECTS)[e.type];
+    const def = forgeTable(kind)[e.type];
     const out = { ...e };
     if (def) for (const [k, spec] of Object.entries(def.params)) if (out[k] === undefined) out[k] = spec[0];
     return out;
   }
+  const forgeTable = (kind) => (kind === "passive" ? E.PASSIVE_EFFECTS : kind === "weapon" ? E.WEAPON_EFFECTS : E.EFFECTS);
+  /** Why an effect type can't be forged yet, or "" when it's unlocked. */
+  function lockReason(kind, type, status) {
+    const key = kind === "weapon" && type === "rider" ? `weapon:rider:${status || "burn"}` : `${kind}:${type}`;
+    if (!(key in E.FAMILIES) || unlocked().has(key)) return "";
+    const rv = E.RIVALS.find((r) => r.id === E.FAMILIES[key]);
+    return rv ? `beat ${rv.name}` : "locked";
+  }
   function defaultEffect(type, kind) {
-    const def = (kind === "passive" ? E.PASSIVE_EFFECTS : E.EFFECTS)[type], e = { type };
+    const def = forgeTable(kind)[type], e = { type };
     for (const [k, spec] of Object.entries(def.params)) e[k] = typeof spec[0] === "string" ? spec[0] : spec[0] + Math.round((spec[1] - spec[0]) / spec[2] / 3) * spec[2];
     return e;
   }
@@ -835,10 +892,16 @@
     return E.validateSkill({ name: fz.name, kind: fz.kind, style: fz.style, element: fz.element, effects: fz.effects, cheaper: fz.cheaper }, { level: forgeLevel() });
   }
   function effectRowHtml(e, i, kind) {
-    const table = kind === "passive" ? E.PASSIVE_EFFECTS : E.EFFECTS;
-    const types = Object.entries(table).map(([k, def]) => `<option value="${k}" ${k === e.type ? "selected" : ""}>${def.label}</option>`).join("");
+    const table = forgeTable(kind);
+    const types = Object.entries(table).map(([k, def]) => {
+      const why = k === e.type ? "" : lockReason(kind, k, k === "rider" ? (unlocked().has("weapon:rider:burn") ? "burn" : "poison") : undefined);
+      return `<option value="${k}" ${k === e.type ? "selected" : ""} ${why ? "disabled" : ""}>${def.label}${why ? ` (locked: ${why})` : ""}</option>`;
+    }).join("");
     const params = Object.entries(table[e.type].params).map(([k, spec]) => {
-      if (typeof spec[0] === "string") return `<label class="param"><span class="lab">${k}</span><select data-fx="${i}" data-k="${k}">${spec.map((x) => `<option value="${x}" ${x === e[k] ? "selected" : ""}>${x}</option>`).join("")}</select></label>`;
+      if (typeof spec[0] === "string") return `<label class="param"><span class="lab">${k}</span><select data-fx="${i}" data-k="${k}">${spec.map((x) => {
+        const why = kind === "weapon" && e.type === "rider" && k === "status" && x !== e[k] ? lockReason("weapon", "rider", x) : "";
+        return `<option value="${x}" ${x === e[k] ? "selected" : ""} ${why ? "disabled" : ""}>${x}${why ? ` (locked: ${why})` : ""}</option>`;
+      }).join("")}</select></label>`;
       return `<label class="param"><span class="lab">${k} <b data-fxv="${i}-${k}">${e[k]}</b></span><input type="range" data-fx="${i}" data-k="${k}" min="${spec[0]}" max="${spec[1]}" step="${spec[2]}" value="${e[k]}"></label>`;
     }).join("");
     return `<div class="fx-row"><div class="row"><select data-fx-type="${i}" aria-label="Effect">${types}</select>
@@ -847,15 +910,35 @@
   function priceHtml() {
     const v = forgePreview(), fz = S.forge, lv = forgeLevel();
     if (!v.skill) return `<p class="warn">${esc(v.errors.join(" "))}</p>`;
-    const s = v.skill, cap = s.kind === "passive" ? E.maxPassiveBudget(lv) : E.maxSkillBudget(lv);
+    const s = v.skill, cap = E.capFor(s.kind, lv);
+    const locks = E.lockedIn(s, unlocked());
     const pct = Math.min(100, (s.budget / cap) * 100);
     return `<div class="price">
       <div class="meter ${v.overBudget ? "over" : ""}"><span style="width:${pct}%"></span></div>
       <p class="small" style="margin:0">Power <b>${s.budget}</b> of ${cap} allowed at level ${lv}${s.kind === "active" ? ` · <b>${s.energy} energy</b>${s.cooldown ? ` · cooldown ${s.cooldown}` : ""}${s.priority ? " · acts first" : ""}` : ""}</p>
       <p class="small" style="margin:0">${esc(E.describeSkill(s))}</p>
       ${v.errors.length ? `<p class="warn" style="margin:0">${esc(v.errors.join(" "))}</p>` : ""}
+      ${locks.length ? `<p class="warn" style="margin:0">Locked: ${locks.map((x) => `${esc(x.label)} (${x.rival ? `beat ${esc(x.rival)} or buy it in the Codex` : "locked"})`).join("; ")}.</p>` : ""}
+      <p class="note" style="margin:0">After forging it needs practice before rival and arena battles: ${E.practiceNeeded(s)} ${s.kind === "active" ? "uses" : "practice battles"}.</p>
       ${fz.note ? `<p class="note" style="margin:0">${esc(fz.note)}</p>` : ""}
     </div>`;
+  }
+  function forgeable(pv) { return !!(pv.skill && !pv.overBudget && !E.lockedIn(pv.skill, unlocked()).length); }
+  /** Rival badges (earned by first wins) and the Codex (buy a family early). */
+  function badgesHtml() {
+    const un = unlocked();
+    const rows = E.RIVALS.map((rv) => {
+      const keys = Object.entries(E.FAMILIES).filter(([, id]) => id === rv.id).map(([k]) => k);
+      if (!keys.length) return "";
+      const won = S.progress.beaten.includes(rv.id);
+      const fam = keys.map((k) => {
+        const open = un.has(k);
+        return `<li><span>${esc(E.familyLabel(k))}</span>${open ? `<span class="tag won">UNLOCKED</span>` : `<button class="btn" type="button" data-codex="${k}">Unlock · ${ECON.codexPrice(k)}</button>`}</li>`;
+      }).join("");
+      return `<div class="badge-row"><div class="row"><b>${esc(rv.name)}</b> <span class="lv">LV ${rv.level}</span> <span class="tag ${won ? "won" : ""}">${won ? "BADGE EARNED" : "BEAT TO EARN"}</span></div><ul class="ledger">${fam}</ul></div>`;
+    }).join("");
+    return `<h2>Badges and Codex</h2>
+      <p class="note" style="margin:0">Everyone can forge damage, burn, shield and heal skills, plus regen and starting-shield passives. Each rival's badge unlocks more. Can't wait? Unlock it now in the Codex.</p>${rows}`;
   }
   function renderForge(v) {
     const fz = S.forge, w = S.progress.wallet, lv = forgeLevel();
@@ -863,7 +946,7 @@
     const ledger = w.ledger.slice(-10).reverse().map((e) => `<li><span>${esc(e.reason)}</span><b class="${e.amount > 0 ? "plus" : "minus"}">${e.amount > 0 ? "+" : ""}${e.amount}</b></li>`).join("");
     const v0 = forgePreview(), price = v0.skill ? ECON.forgeCost(v0.skill) : 0;
     const aiOk = S.ai.sample && !S.ai.off;
-    const lib = S.progress.library.map((s) => `<div class="lib-item" style="--c:${STYLE_VAR[s.style]}"><div><b>${esc(s.name)}</b> <span class="tag">${s.kind === "passive" ? "PASSIVE" : E.STYLE_INFO[s.style].label.toUpperCase()}</span>
+    const lib = S.progress.library.map((s) => `<div class="lib-item" style="--c:${STYLE_VAR[s.style]}"><div><b>${esc(s.name)}</b> <span class="tag">${s.kind === "active" ? E.STYLE_INFO[s.style].label.toUpperCase() : KIND_LABEL[s.kind]}</span>${s.from === "drop" ? ` <span class="tag next">${(s.rarity || "common").toUpperCase()} BLUEPRINT</span>` : ""}
       <p class="small" style="margin:2px 0 0">${esc(E.describeSkill(s))}</p></div><button class="btn icon" type="button" data-lib-del="${esc(s.id)}" aria-label="Delete ${esc(s.name)}">×</button></div>`).join("");
     const shop = Object.values(E.ITEMS).map((it) => `<div class="shop-item"><div><b>${it.name}</b><p class="small" style="margin:2px 0 0">${it.blurb} You own ${S.progress.inventory[it.id] || 0}.</p></div>
       <button class="btn" type="button" data-buy="${it.id}">Buy · ${it.price}</button></div>`).join("");
@@ -881,6 +964,7 @@
           <div class="shop">${shop}</div>
           <p class="note">Items are used up when your fighter uses them in a real battle. Practice in the gym doesn't use them.</p>
         </div>
+        <div class="box" id="badges">${badgesHtml()}</div>
         <div class="box">
           <h2>Your skills · ${S.progress.library.length} of ${LIBRARY_MAX}</h2>
           ${lib || `<p class="note">Forged skills appear here. Equip them in the Design tab.</p>`}
@@ -893,13 +977,13 @@
           ${fz.mode === "describe" ? `
             <div class="field"><label for="fz-desc">Describe the skill</label>
               <textarea id="fz-desc" rows="3" maxlength="400" placeholder="Shoots fireballs that set the enemy on fire">${esc(fz.desc)}</textarea></div>
-            <div class="field"><span class="lab">Kind</span>${seg("forge-kind", fz.kind, [["active", "Skill"], ["passive", "Passive"]])}</div>
+            <div class="field"><span class="lab">Kind</span>${seg("forge-kind", fz.kind, [["active", "Skill"], ["passive", "Passive"], ["weapon", unlocked().has("weapon:slot") ? "Weapon" : "Weapon (locked)"]])}</div>
             <div class="row"><button class="btn primary" type="button" id="fz-draft" ${aiOk && !fz.busy ? "" : "disabled"}>${fz.busy ? "Drafting…" : `Draft with Claude · ${ECON.PRICES.draft} Cycles`}</button></div>
             <p class="note">${aiOk ? "Claude turns your words into a skill file. The game then checks it, scales it to your level and sets its energy cost. You only pay if the draft works." : "Drafting needs Claude, which isn't available in this view. Build it by hand instead."}</p>
           ` : `
             <div class="grid2">
               <div class="field"><label for="fz-name">Name</label><input type="text" id="fz-name" maxlength="16" value="${esc(fz.name)}"></div>
-              <div class="field"><span class="lab">Kind</span>${seg("forge-kind", fz.kind, [["active", "Skill"], ["passive", "Passive"]])}</div>
+              <div class="field"><span class="lab">Kind</span>${seg("forge-kind", fz.kind, [["active", "Skill"], ["passive", "Passive"], ["weapon", unlocked().has("weapon:slot") ? "Weapon" : "Weapon (locked)"]])}</div>
               <div class="field"><label class="lab" for="fz-style">Style</label><select id="fz-style">${E.STYLES.map((s) => `<option value="${s}" ${s === fz.style ? "selected" : ""}>${E.STYLE_INFO[s].label}</option>`).join("")}</select></div>
               <div class="field"><label class="lab" for="fz-element">Element (look)</label><select id="fz-element">${E.ELEMENTS.map((x) => `<option value="${x}" ${x === fz.element ? "selected" : ""}>${x}</option>`).join("")}</select></div>
             </div>
@@ -908,10 +992,11 @@
             ${fz.kind === "active" ? `<div class="field"><span class="lab">Make it cheaper (lower energy, longer cooldown)</span>${seg("forge-cheaper", fz.cheaper, [[0, "No"], [1, "−1 energy"], [2, "−2 energy"]])}</div>` : ""}
             ${fz.why ? `<p class="small"><b>Claude:</b> ${esc(fz.why)}</p>` : ""}
             <div id="fz-price">${priceHtml()}</div>
-            <div class="row"><button class="btn primary" type="button" id="fz-forge" ${v0.skill && !v0.overBudget ? "" : "disabled"}>Forge · ${price} Cycles</button></div>
+            <div class="row"><button class="btn primary" type="button" id="fz-forge" ${forgeable(v0) ? "" : "disabled"}>Forge · ${price} Cycles</button></div>
             <p class="note">The power limit grows with your active fighter's level (now ${lv}). The game sets energy cost and cooldown from the skill's power.</p>
           `}
         </div>
+        <div class="box"><h2>Rulebook</h2>${E.RULEBOOK.map((sec) => `<div><span class="lab">${esc(sec.title)}</span><ul class="pro-why">${sec.items.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`).join("")}</div>
       </div>
     </div>`;
     bindForge(v);
@@ -919,15 +1004,23 @@
   function bindForge(v) {
     const fz = S.forge;
     const rerender = () => { const y = window.scrollY; renderForge(v); window.scrollTo({ top: y }); };
-    const reprice = () => { const p = $("fz-price"); if (p) p.innerHTML = priceHtml(); const b = $("fz-forge"); const pv = forgePreview(); if (b) { b.disabled = !(pv.skill && !pv.overBudget); b.textContent = `Forge · ${pv.skill ? ECON.forgeCost(pv.skill) : 0} Cycles`; } };
+    const reprice = () => { const p = $("fz-price"); if (p) p.innerHTML = priceHtml(); const b = $("fz-forge"); const pv = forgePreview(); if (b) { b.disabled = !forgeable(pv); b.textContent = `Forge · ${pv.skill ? ECON.forgeCost(pv.skill) : 0} Cycles`; } };
     v.onclick = async (e) => {
       const sg = e.target.closest("[data-seg]");
       if (sg) {
         const k = sg.dataset.seg, val = sg.dataset.val;
         if (k === "forge-mode") fz.mode = val;
+        if (k === "forge-kind" && val === "weapon" && !unlocked().has("weapon:slot")) { toast(`The weapon slot opens with ${E.RIVALS[0].name}'s badge, or in the Codex.`); return; }
         if (k === "forge-kind" && val !== fz.kind) { const desc = fz.desc, mode = fz.mode; resetForge(val); S.forge.desc = desc; S.forge.mode = mode; }
         if (k === "forge-cheaper") fz.cheaper = +val;
         rerender(); return;
+      }
+      const cx = e.target.closest("[data-codex]");
+      if (cx) {
+        const key = cx.dataset.codex, price = ECON.codexPrice(key);
+        if (unlocked().has(key)) return;
+        if (pay(price, `Codex: ${E.familyLabel(key)}`)) { S.progress.codex = [...(S.progress.codex || []), key]; saveProgress(); toast(`${E.familyLabel(key)} unlocked.`); rerender(); }
+        return;
       }
       const buy = e.target.closest("[data-buy]");
       if (buy) {
@@ -938,19 +1031,20 @@
       const libDel = e.target.closest("[data-lib-del]");
       if (libDel) {
         const id = libDel.dataset.libDel;
-        if (S.fighters.some((f) => f.moves.includes(id) || (f.passive && f.passive.id === id))) { toast("A fighter has this equipped. Unequip it in Design first."); return; }
+        if (S.fighters.some((f) => f.moves.includes(id) || (f.passive && f.passive.id === id) || (f.weapon && f.weapon.id === id))) { toast("A fighter has this equipped. Unequip it in Design first."); return; }
         S.progress.library = S.progress.library.filter((s) => s.id !== id); saveProgress(); rerender(); return;
       }
       const fxDel = e.target.closest("[data-fx-del]");
       if (fxDel) { fz.effects.splice(+fxDel.dataset.fxDel, 1); fz.note = ""; rerender(); return; }
       if (e.target.id === "fz-add") {
-        const table = fz.kind === "passive" ? E.PASSIVE_EFFECTS : E.EFFECTS;
-        const t = Object.keys(table).find((k) => !fz.effects.some((x) => x.type === k));
+        const table = forgeTable(fz.kind);
+        const t = Object.keys(table).find((k) => !fz.effects.some((x) => x.type === k) && !lockReason(fz.kind, k, k === "rider" ? (unlocked().has("weapon:rider:burn") ? "burn" : "poison") : undefined));
+        if (!t) { toast("No more unlocked effects to add."); return; }
         fz.effects.push(defaultEffect(t, fz.kind)); rerender(); return;
       }
       if (e.target.id === "fz-forge") {
         const pv = forgePreview();
-        if (!pv.skill || pv.overBudget) return;
+        if (!forgeable(pv)) { const l = pv.skill ? E.lockedIn(pv.skill, unlocked()) : []; if (l.length) toast(`Locked: ${l.map((x) => x.label).join(", ")}.`); return; }
         if (S.progress.library.length >= LIBRARY_MAX) { toast(`Your library holds ${LIBRARY_MAX} skills. Delete one first.`); return; }
         const cost = ECON.forgeCost(pv.skill);
         if (!pay(cost, `Forged ${pv.skill.name}`)) return;
@@ -985,7 +1079,8 @@
     if (!ECON.canAfford(S.progress.wallet, ECON.PRICES.draft)) { toast(`Drafting costs ${ECON.PRICES.draft} Cycles.`); return; }
     fz.busy = true; rerender();
     try {
-      const d = await A.draftSkill(S.ai.sample, fz.desc, fz.kind, forgeLevel());
+      if (fz.kind === "weapon" && !unlocked().has("weapon:slot")) throw { code: "locked", message: "The weapon slot isn't unlocked yet." };
+      const d = await A.draftSkill(S.ai.sample, fz.desc, fz.kind, forgeLevel(), undefined, unlocked());
       pay(ECON.PRICES.draft, "Claude drafted a skill");      // only charged when the draft works
       Object.assign(fz, { mode: "build", name: d.skill.name, style: d.skill.style, element: d.skill.element, effects: d.skill.effects.map((x) => withDefaults(x, fz.kind)),
                           cheaper: 0, why: d.why, note: d.scaled ? d.errors[0] : "" });
@@ -1051,6 +1146,7 @@
   }
   function renderCoachBox() { for (const el of document.querySelectorAll("[data-coach-box]")) el.innerHTML = coachHtml(); }
   document.addEventListener("click", (e) => { if (e.target.id === "ask-coach") askCoach(); });
+  document.addEventListener("click", (e) => { if (e.target.closest("[data-go-gym]")) setTab("gym"); });
 
   // ---------- gym ----------
   function needFighter(v, what) {
@@ -1085,6 +1181,7 @@
             <button class="btn" type="button" id="spar">Spar by hand</button></div>
           <p class="note">${costNote} Practice is instant and uses no Claude: it builds XP, mastery and instincts. In <b>Spar by hand</b> you choose each action and your fighter's instincts learn by copying you (free, double XP).</p>
         </div>
+        ${practiceBox(f, q)}
         ${rep ? reportBox(rep) : ""}
         <div data-coach-box>${coachHtml()}</div>
       </div>
@@ -1113,19 +1210,36 @@
       const sg = e.target.closest('[data-seg="reps"]');
       if (sg) { S.reps = +sg.dataset.val; renderGym(v); return; }
       if (e.target.id === "train") doTrain();
+      if (e.target.id === "drill") doTrain($("drill-pick")?.value || null);
       if (e.target.id === "spar") startSpar();
       if (e.target.id === "watch-last" && S.report) { S.lastBattle = { match: S.report.lastMatch, foe: S.report.lastFoe, label: "Last practice round" }; setTab("battle"); }
     };
   }
   function winPct(rec) { const n = rec.w + rec.l + rec.d; return n ? Math.round(((rec.w + rec.d / 2) / n) * 100) + "%" : "–"; }
-  function doTrain() {
+  /** What's still in training, and a drill that makes the fighter use one skill whenever it can. */
+  function practiceBox(f, q) {
+    const rd = E.readiness(f);
+    if (!rd.pending.length) return "";
+    const skills = rd.pending.filter((x) => x.kind === "active");
+    const rows = rd.pending.map((x) => `<li><span>${esc(x.name)} <span class="note">${KIND_LABEL[x.kind].toLowerCase()}</span></span><span class="meter" style="flex:1;max-width:45%"><span style="width:${Math.round((Math.min(x.have, x.need) / x.need) * 100)}%"></span></span><b>${Math.min(x.have, x.need)}/${x.need}</b></li>`).join("");
+    return `<div class="box" id="practice-box">
+      <h2>In training</h2>
+      <p class="note" style="margin:0">These can't be used against rivals or in the arena until they're practiced. Skills count uses; passives and weapons count practice battles.</p>
+      <ul class="ledger practice">${rows}</ul>
+      ${skills.length ? `<div class="row"><select id="drill-pick" aria-label="Skill to drill">${skills.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join("")}</select>
+        <button class="btn primary" type="button" id="drill">Drill ${S.reps} round${S.reps > 1 ? "s" : ""}${q.cost ? ` · ${q.cost} Cycles` : ""}</button></div>
+        <p class="note" style="margin:0">A drill is normal practice where ${esc(f.name)} uses that skill whenever it can.</p>` : ""}
+    </div>`;
+  }
+  function doTrain(drill = null) {
     const f = active();
     if (!f) return;
     try {
       const partner = E.PARTNERS.find((p) => p.id === S.partnerId);
       if (f.level < partner.unlock) throw new Error(`${partner.name} unlocks at level ${partner.unlock}.`);
       const paid = ECON.payForGym(S.progress.wallet, S.reps);   // throws if you can't afford it
-      const { fighter, report } = E.train(f, S.partnerId, S.reps);
+      const before = E.readiness(f).pending.map((x) => x.id);
+      const { fighter, report } = E.train(f, S.partnerId, S.reps, drill ? { drill } : {});
       S.progress.wallet = paid.wallet; saveProgress();
       report.lastFoe = E.partnerFighter(S.partnerId, f);
       report.fighterId = f.id;
@@ -1133,7 +1247,9 @@
       S.report = report;
       queueReview(f.id, A.gymSummary(report));
       render();
-      if (report.levelAfter > report.levelBefore) toast(`Level up! ${fighter.name} is now level ${report.levelAfter}. Spend the stat point in Design.`);
+      const ready = before.filter((id) => !E.readiness(fighter).pending.some((x) => x.id === id));
+      if (ready.length) toast(`${ready.map((id) => (E.skillOf(fighter, id) || [fighter.passive, fighter.weapon].find((x) => x && x.id === id) || { name: id }).name).join(", ")} ${ready.length > 1 ? "are" : "is"} battle-ready.`);
+      else if (report.levelAfter > report.levelBefore) toast(`Level up! ${fighter.name} is now level ${report.levelAfter}. Spend the stat point in Design.`);
     } catch (err) { toast(err.message); }
   }
   function reportBox(r) {
@@ -1267,6 +1383,7 @@
     if (!S.rivalId) S.rivalId = (E.RIVALS.find((r, i) => rivalState(i) === "next") || E.RIVALS[0]).id;
     const pending = S.pendingChallenge;
     v.innerHTML = `
+      ${gateHtml(f)}
       ${pending ? "" : `<div class="box" id="ladder">${ladderHtml()}</div>`}
       <div class="box">
         <div class="airow"><button class="switch" type="button" role="switch" id="ai-switch" aria-checked="${aiUsable()}" aria-label="Claude plays every move"
@@ -1282,6 +1399,14 @@
       <div class="box"><h2>Battle log</h2><ol class="log" id="log"></ol></div>`;
     renderBattleBody(v, pending);
   }
+  /** Rival and arena battles need a battle-ready loadout (practiced files, clauses kept). */
+  function gateHtml(f) {
+    const rd = E.readiness(f);
+    if (rd.ready) return "";
+    const items = [...rd.pending.map((x) => `${esc(x.name)} ${Math.min(x.have, x.need)}/${x.need} ${x.kind === "active" ? "uses" : "battles"}`), ...rd.clauses.map(esc)];
+    return `<div class="notice" id="gate"><b>${esc(f.name)} isn't battle-ready.</b> ${items.join(" · ")}.
+      <div class="row" style="margin-top:6px"><button class="btn" type="button" data-go-gym>Practice in the Gym</button></div></div>`;
+  }
   function foeKey() { return S.pendingChallenge ? `a:${S.pendingChallenge.owner}|${S.pendingChallenge.id}` : `r:${S.rivalId}`; }
   function scoutHtml() {
     const s = S.scouting[foeKey()];
@@ -1296,11 +1421,15 @@
         <canvas data-sprite="r:${rv.id}" width="28" height="28" aria-hidden="true"></canvas>
         <span class="name">${esc(rv.name)} <span class="lv">LV ${rv.level}</span></span>
         <span class="tag ${st}">${st === "won" ? "BEATEN" : st === "next" ? "NEXT UP" : "LOCKED"}</span>
-        <span class="blurb">${st === "locked" ? `Beat ${esc(E.RIVALS[i - 1].name)} to unlock.` : `${esc(rv.persona)} Reward: ${ECON.rivalReward(rv.level, st !== "won")} Cycles.`}</span></button>`;
+        <span class="blurb">${st === "locked" ? `Beat ${esc(E.RIVALS[i - 1].name)} to unlock.` : `${esc(rv.persona)} Reward: ${ECON.rivalReward(rv.level, st !== "won")} Cycles${st === "won" ? "" : badgeText(rv.id)}.`}</span></button>`;
     }).join("");
     const rv = E.RIVALS.find((r) => r.id === S.rivalId) || E.RIVALS[0];
     return `<h2>Rival ladder</h2><div class="rivals">${rivals}</div>
-      <div class="row"><button class="btn primary" type="button" id="fight" ${battleRunning() ? "disabled" : ""}>Fight ${esc(rv.name)}</button></div>`;
+      <div class="row"><button class="btn primary" type="button" id="fight" ${battleRunning() || !E.readiness(active() || { moves: [] }).ready ? "disabled" : ""}>Fight ${esc(rv.name)}</button></div>`;
+  }
+  function badgeText(rivalId) {
+    const keys = Object.entries(E.FAMILIES).filter(([, id]) => id === rivalId).map(([k]) => E.familyLabel(k));
+    return keys.length ? ` and a badge: ${keys.join(", ")}` : "";
   }
   function refreshLadder() { const l = $("ladder"); if (l) { l.innerHTML = ladderHtml(); paintSprites(l); } }
   function renderBattleBody(v, pending) {
@@ -1390,6 +1519,7 @@
     else if (!uid) pubBox = `<p class="note">Sign in to claude.ai to publish fighters.</p>`;
     else if (S.me.canWrite === false) pubBox = `<p class="note">You have view-only access, so you can challenge fighters but not publish or record results. Ask the owner for Contributor access.</p>`;
     else if (!f) pubBox = `<p class="note">Create a fighter to publish it.</p>`;
+    else if (!E.readiness(f).ready) pubBox = gateHtml(f);
     else {
       const outdated = mine && (mine.level !== f.level || mine.playbook !== f.playbook || mine.persona !== f.persona || mine.moves.join() !== f.moves.join()
         || JSON.stringify(mine.rules || []) !== JSON.stringify(f.rules || []) || (mine.passive?.id || null) !== (f.passive?.id || null) || (mine.item || null) !== (f.item || null));
@@ -1420,7 +1550,11 @@
     paintSprites(v);
     fillOwnerNames(v);
     v.onclick = (e) => {
-      if (e.target.id === "publish" && f) { publish(f); render(); return; }
+      if (e.target.id === "publish" && f) {
+        const rd = E.readiness(f);
+        if (!rd.ready) { toast(`${f.name} isn't battle-ready yet: ${rd.pending.map((x) => x.name).concat(rd.clauses).join(", ")}.`); return; }
+        publish(f); render(); return;
+      }
       if (e.target.id === "unpublish" && f) { unpublish(f.id); toast(`${f.name} left the arena.`); render(); return; }
       const ch = e.target.closest("[data-challenge]");
       if (ch && f) { const [owner, id] = ch.dataset.challenge.split("|"); S.pendingChallenge = { owner, id }; setTab("battle"); }
@@ -1485,7 +1619,8 @@
     const eff = a.effect === "super" ? " · super effective" : a.effect === "resisted" ? " · resisted" : "";
     const src = a.source === "ai" ? ["ai", "AI"] : a.source === "rule" ? ["rule", "RULE"] : a.source === "you" ? ["you", "YOU"] : ["", "INSTINCT"];
     const what = a.stunned ? "stunned" : a.fizzled ? "no energy" : a.dodged ? "dodged" : a.kind === "item" ? `item${a.healed ? ` +${a.healed} HP` : ""}` : a.kind === "rest" ? "rest" : `−${(a.points || 0).toFixed(1)} HP${eff}`;
-    const extra = [a.applied.length ? a.applied.join(", ") : "", a.healed && a.kind === "skill" ? `+${a.healed} HP` : "", a.absorbed ? `${a.absorbed} blocked` : "", a.reflected ? `${a.reflected} reflected` : ""].filter(Boolean).join(" · ");
+    const extra = [a.crit ? "critical hit" : "", a.applied.length ? a.applied.join(", ") : "", a.healed && a.kind === "skill" ? `+${a.healed} HP` : "", a.absorbed ? `${a.absorbed} blocked` : "",
+      a.guarded ? `${a.guarded} guarded` : "", a.reflected ? `${a.reflected} reflected` : "", a.capped ? "one-hit cap" : ""].filter(Boolean).join(" · ");
     li.innerHTML = `<span class="t">T${String(turn).padStart(2, "0")}</span><span class="chip" style="--c:${a.style ? STYLE_VAR[a.style] : "var(--muted)"}">${esc(a.name)}</span>
       <span class="who">${esc(a.agent_name)} <span class="src ${src[0]}">${src[1]}</span></span>
       <span class="pts">${what}${extra ? " · " + esc(extra) : ""}</span>${a.line ? `<span class="said">“${esc(a.line)}”</span>` : ""}${a.rule ? `<span class="said">${esc(a.rule)}</span>` : ""}`;
@@ -1625,6 +1760,8 @@
   function startBattle(kind, target) {
     const meRaw = active();
     if (!meRaw || !$("scene")) return;
+    const rd = E.readiness(meRaw);
+    if (!rd.ready) { toast(rd.pending.length ? `${rd.pending[0].name} is still in training (${rd.pending[0].have}/${rd.pending[0].need}). Practice it in the Gym first.` : rd.clauses[0]); return; }
     stopBattle();
     const foe = currentFoe(kind, target);
     if (!foe) { toast("That fighter has left the arena."); return; }
@@ -1722,6 +1859,10 @@
           if (first) S.progress.beaten = [...S.progress.beaten, rv.id];
           earn(reward, `${first ? "First win" : "Win"} vs ${rv.name}`, rv.id);
           lines.push(`+${reward} Cycles.`);
+          const badge = Object.entries(E.FAMILIES).filter(([, id]) => id === rv.id).map(([k]) => k);
+          if (first && badge.length) lines.push(`Badge earned: ${badge.map((k) => E.familyLabel(k)).join(", ")} unlocked.`);
+          const drop = grantDrop({ source: first ? "rivalFirst" : "rival", opponentLevel: rv.level, prefer: first ? badge[0] : null });
+          if (drop) lines.push(drop);
           const i = E.RIVALS.findIndex((r) => r.id === rv.id), next = E.RIVALS[i + 1];
           if (first) lines.push(next ? `${rv.name} beaten. ${next.name} is unlocked.` : "You beat the champion. The ladder is yours.");
           if (first && next) S.rivalId = next.id;
@@ -1732,7 +1873,10 @@
         lines.push(recordResult(b, m) ? "Result recorded on the arena leaderboard." : "This result isn't recorded (you need Contributor access and a sign-in).");
         const own = b.target.owner === S.me.id;
         const paid = ECON.payArena(S.progress.wallet, award.result, own, `${b.target.owner}/${b.target.id}`);
-        if (paid.amount) { S.progress.wallet = paid.wallet; saveProgress(); lines.push(`+${paid.amount} Cycles.`); }
+        if (paid.amount) {
+          S.progress.wallet = paid.wallet; saveProgress(); lines.push(`+${paid.amount} Cycles.`);
+          if (award.result === "win") { const drop = grantDrop({ source: "arena", opponentLevel: b.foe.level || 1 }); if (drop) lines.push(drop); }
+        }
         else if (own) lines.push("No Cycles for beating your own fighter.");
         else if (!paid.amount) lines.push("Today's arena rewards are used up; more tomorrow.");
       }
@@ -1748,6 +1892,21 @@
       <div data-coach-box>${coachHtml()}</div>
     </div>`;
     renderActiveBar(); renderWallet(); refreshAiUi();
+  }
+  /** Maybe add a blueprint to the library after a real win; duplicates become Cycles. Returns a result line or "". */
+  function grantDrop({ source, opponentLevel, prefer }) {
+    const f = active();
+    const d = ECON.rollDrop({ source, opponentLevel, level: f ? f.level : 1, unlocked: unlocked(), owned: S.progress.library, prefer });
+    if (!d) return "";
+    const what = `${d.rarity} ${KIND_LABEL[d.file.kind].toLowerCase()}`;
+    if (d.duplicate || S.progress.library.length >= LIBRARY_MAX) {
+      const refund = d.refund || ECON.RARITY[d.rarity].refund;
+      earn(refund, `Duplicate blueprint: ${d.file.name}`);
+      return `Blueprint: ${d.file.name} (${what}), which you already have, so it became +${refund} Cycles.`;
+    }
+    S.progress.library = [...S.progress.library, d.file];
+    saveProgress();
+    return `New blueprint: ${d.file.name} (${what}) is in your library. Equip it in Design, then practice it in the Gym.`;
   }
   /** Watch a finished practice round again (no AI, no XP). */
   async function playReplay(lb) {

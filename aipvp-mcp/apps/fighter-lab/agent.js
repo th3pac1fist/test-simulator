@@ -33,6 +33,8 @@
     "- Stats: Power adds damage, Vitality adds max HP, Speed gives a chance to dodge an attack completely (its damage and effects). A Potion heals 15% of max HP. Shields, heals, burn and poison grow with level, like damage.",
     "- Damage is multiplied by the phase: turns 1-4 x1, 5-8 x1.5, 9-12 x2. Healing and burn/poison are not.",
     "- At 0 HP a fighter is knocked out. After 12 turns the fighter with the higher share of HP left wins.",
+    "- Clauses: a fighter heals at most half its max HP per battle in total, and one action can't deal more than 40% of the target's max HP.",
+    "- A weapon is always on: it can boost one style's damage, add burn or poison to that style's hits, land critical hits, heal on hits, block part of the first hit each turn, or dodge.",
   ].join("\n");
 
   function quoteBlock(text) {
@@ -86,7 +88,8 @@
           return `T${t.turn}: you ${mineName} (${STYLE_LABEL(a.style)}) vs them ${opponentActionName(o, b, bIdx)} (${STYLE_LABEL(b.style)}). You dealt ${a.points}, took ${b.points}.${extras ? " " + extras + "." : ""}`;
         }).join("\n")
       : "(first turn)";
-    const passive = (s, label) => (s.f.passive ? `${label} passive: ${E.describeSkill(s.f.passive).replace(/^Passive: /, "")}` : `${label} passive: none`);
+    const passive = (s, label) => (s.f.passive ? `${label} passive: ${E.describeSkill(s.f.passive).replace(/^Passive: /, "")}` : `${label} passive: none`)
+      + (s.f.weapon ? `. ${label} weapon: ${E.describeSkill(s.f.weapon).replace(/^Weapon: /, "").replace(/\.$/, "")}` : "");
     return [
       `You are the battle brain of ${f.name}, a fighter in Fighter Lab, a turn-based game. Choose ${f.name}'s action for this turn.`,
       "",
@@ -200,18 +203,22 @@
   }
 
   // ---------- skill drafts (describe a skill in words) ----------
-  function draftPrompt(description, kind, level) {
-    const table = kind === "passive" ? E.PASSIVE_EFFECTS : E.EFFECTS;
-    const effects = Object.entries(table).map(([type, def]) => {
+  const KIND_WORDS = { active: "a battle skill", passive: "a passive ability", weapon: "a weapon" };
+  /** Only effect families the player has unlocked are offered (all of them if `unlocked` is omitted). */
+  function draftPrompt(description, kind, level, unlocked) {
+    const table = kind === "passive" ? E.PASSIVE_EFFECTS : kind === "weapon" ? E.WEAPON_EFFECTS : E.EFFECTS;
+    const allowed = (type, def) => !unlocked || (type === "rider"
+      ? def.params.status.some((st) => unlocked.has(`weapon:rider:${st}`)) : unlocked.has(`${kind}:${type}`));
+    const effects = Object.entries(table).filter(([type, def]) => allowed(type, def)).map(([type, def]) => {
       const params = Object.entries(def.params).map(([k, spec]) => (typeof spec[0] === "string" ? `${k}: one of ${spec.join("/")}` : `${k}: ${spec[0]}-${spec[1]}`)).join(", ");
       return `- ${type}${params ? ` (${params})` : ""}: ${def.label}`;
     }).join("\n");
     return [
-      `You design ${kind === "passive" ? "a passive ability" : "a battle skill"} for Fighter Lab, a turn-based game, from a player's description.`,
+      `You design ${KIND_WORDS[kind] || KIND_WORDS.active} for Fighter Lab, a turn-based game, from a player's description.`,
       "",
       RULES,
       "",
-      `Use only these ${kind === "passive" ? "passive " : ""}effects, with numbers inside these ranges (at most 3 effects, each type once):`,
+      `Use only these ${kind === "active" ? "" : kind + " "}effects (the ones this player has unlocked), with numbers inside these ranges (at most 3 effects, each type once):`,
       effects,
       `Styles: aggro, social, mind, guard. Elements (flavor only): ${E.ELEMENTS.join(", ")}.`,
       `The fighter is level ${level}. The game prices the skill itself and scales it down if it's too strong, so pick effects that capture the idea rather than maxing numbers.`,
@@ -223,10 +230,13 @@
     ].join("\n");
   }
   /** Claude drafts a skill; the game validates, scales to the level, and prices it. */
-  async function draftSkill(sample, description, kind, level, signal) {
-    const reply = await sample.json(draftPrompt(description, kind, level), { modelTier: "quick", cache: false, ...(signal ? { signal } : {}) });
+  async function draftSkill(sample, description, kind, level, signal, unlocked) {
+    const reply = await sample.json(draftPrompt(description, kind, level, unlocked), { modelTier: "quick", cache: false, ...(signal ? { signal } : {}) });
     if (!reply || typeof reply !== "object") throw { code: "invalid_reply", message: "Claude's draft couldn't be read." };
-    const v = E.fitSkill({ ...reply, kind }, level);
+    // a draft can't sneak in locked effects: they're dropped before the game prices it
+    let raw = { ...reply, kind };
+    if (unlocked && Array.isArray(raw.effects)) raw = { ...raw, effects: raw.effects.filter((e) => e && typeof e.type === "string" && unlocked.has(E.familyOf(kind, e))) };
+    const v = E.fitSkill(raw, level);
     if (!v.skill) throw { code: "invalid_reply", message: v.errors.join(" ") || "The draft didn't use any valid effects." };
     return { ...v, why: E.cleanText(typeof reply.why === "string" ? reply.why : "", 200, false) };
   }
@@ -234,7 +244,8 @@
   // ---------- scouting (one request before a battle) ----------
   function scoutPrompt(me, foe) {
     const kit = (f, hide) => f.moves.map((m, k) => `- ${hide && !E.BASIC[m] ? `Skill ${"ABCD"[k]}` : E.skillOf(f, m).name}: ${E.describeSkill(E.skillOf(f, m))}`).join("\n");
-    const extras = (f) => [f.passive ? `Passive: ${E.describeSkill(f.passive).replace(/^Passive: /, "")}` : "No passive", f.item ? `Item: ${E.ITEMS[f.item].name} (${E.ITEMS[f.item].blurb})` : "No item"].join(". ");
+    const extras = (f) => [f.passive ? `Passive: ${E.describeSkill(f.passive).replace(/^Passive: /, "")}` : "No passive",
+      f.weapon ? `Weapon: ${E.describeSkill(f.weapon).replace(/^Weapon: /, "")}` : "No weapon", f.item ? `Item: ${E.ITEMS[f.item].name} (${E.ITEMS[f.item].blurb})` : "No item"].join(". ");
     return [
       `You scout an opponent for ${me.name}, a fighter in Fighter Lab. Write a short battle plan ${me.name} will follow.`,
       "", RULES, "",
@@ -273,6 +284,7 @@
       "", RULES, "",
       `FIGHTER: level ${f.level}. Skills:`, kit,
       f.passive ? `Passive: ${E.describeSkill(f.passive).replace(/^Passive: /, "")}` : "No passive.",
+      f.weapon ? `Weapon: ${E.describeSkill(f.weapon).replace(/^Weapon: /, "")}` : "No weapon.",
       f.item ? `Item: ${E.ITEMS[f.item].name} (${E.ITEMS[f.item].blurb})` : "No item.",
       (f.rules || []).length ? `Battle rules it always follows:\n${f.rules.map((rl) => "- " + E.describeRule(rl, f)).join("\n")}` : "",
       "Trainer's instructions:", quoteBlock(E.cleanText(f.persona, E.PERSONA_MAX, false)), "",
@@ -318,6 +330,7 @@
       "", RULES, "",
       `FIGHTER: level ${f.level}. Stats: ${f.stats.power} Power, ${f.stats.vitality} Vitality, ${f.stats.speed} Speed. Skills:`, kit,
       f.passive ? `Passive: ${E.describeSkill(f.passive).replace(/^Passive: /, "")}` : "No passive.",
+      f.weapon ? `Weapon: ${E.describeSkill(f.weapon).replace(/^Weapon: /, "")}` : "No weapon.",
       f.item ? `Item: ${E.ITEMS[f.item].name} (${E.ITEMS[f.item].blurb})` : "No item.",
       (f.rules || []).length ? `Battle rules it always follows (no need to repeat them):\n${f.rules.map((rl) => "- " + E.describeRule(rl, f)).join("\n")}` : "",
       "", "WHY THE OPTIMIZER CHOSE THIS BUILD:", report.reasons.map((r) => "- " + r).join("\n"),

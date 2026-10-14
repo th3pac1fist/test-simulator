@@ -68,3 +68,30 @@ test("a damaged save becomes a valid wallet", () => {
   assert.equal(w.roundsUsed, 0);
   assert.ok(!w.ledger[0].reason.includes("\u0000"));
 });
+
+test("codex: early unlocks cost more the later their badge; starters are free", () => {
+  assert.equal($.codexPrice("active:burn"), 0);
+  assert.equal($.codexPrice("weapon:slot"), 60 + 15 * 3);
+  assert.equal($.codexPrice("active:stun"), 60 + 15 * 26);
+  assert.ok($.codexPrice("active:poison") > $.codexPrice("active:weaken"));
+});
+
+test("drops: odds, legality, unlocked families only, duplicates refund", () => {
+  const unlocked = E.unlockedFamilies({ beaten: ["sal", "velvet"] });
+  let drops = 0;
+  const r = E.rng(7);
+  for (let i = 0; i < 1000; i++) {
+    const d = $.rollDrop({ source: "rival", opponentLevel: 10, level: 12, unlocked, owned: [], rng: r });
+    if (!d) continue;
+    drops++;
+    const v = E.validateSkill(d.file, { level: 12 });
+    assert.ok(v.skill && !v.overBudget, `${d.file.name} is legal at level 12`);
+    assert.deepEqual(E.lockedIn(d.file, unlocked), [], `${d.file.name} only uses unlocked families`);
+  }
+  assert.ok(drops > 150 && drops < 250, `${drops} drops in 1000 repeat wins (20%)`);
+  const first = $.rollDrop({ source: "rivalFirst", opponentLevel: 6, level: 6, unlocked, owned: [], prefer: "active:weaken", rng: E.rng(3) });
+  assert.ok(first && first.file.effects.some((e) => e.type === "weaken"), "the first win drops something from the new badge");
+  const dup = $.rollDrop({ source: "rivalFirst", opponentLevel: 6, level: 6, unlocked, owned: [first.file], prefer: "active:weaken", rng: E.rng(3) });
+  assert.ok(dup.duplicate && dup.refund > 0, "a duplicate turns into Cycles");
+  assert.equal($.rollDrop({ source: "practice", opponentLevel: 6, level: 6, unlocked, owned: [], rng: E.rng(3) }), null, "never from practice");
+});

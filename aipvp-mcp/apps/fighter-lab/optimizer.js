@@ -1,6 +1,6 @@
 /* Fighter Lab Pro build: searches for the strongest fair build for one fighter.
- * Fair means legal at the fighter's level (every skill re-validated) and affordable with the
- * player's Cycles. Builds are scored by simulated battles against the rival ladder, the gym
+ * Fair means legal at the fighter's level (every skill re-validated), only from effect families the
+ * player has unlocked, within the rulebook's clauses, and affordable with the player's Cycles. Builds are scored by simulated battles against the rival ladder, the gym
  * partners, published arena fighters and a meta pool of the other finalists.
  * Pure logic, no DOM; async so the page stays responsive, cancellable, deterministic per seed. */
 (function (root, factory) {
@@ -37,6 +37,15 @@
     flow:   { name: "DYNAMO", style: "mind", why: "extra energy for big skills", effects: [{ type: "energy_flow", amount: 2, every: 1 }] },
     boost:  { name: "MASTERY", style: "aggro", why: "boosts one style's damage", effects: [{ type: "style_boost", style: "aggro", pct: 0.5 }], perStyle: true },
   };
+  const WEAPON_ARCHETYPES = {
+    flame:  { name: "FLAME SWORD", style: "aggro", why: "its Aggro skills can set them on fire", effects: [{ type: "rider", style: "aggro", status: "burn", chance: 0.6 }, { type: "edge", style: "aggro", pct: 0.4 }] },
+    axe:    { name: "WAR AXE", style: "aggro", why: "critical hits", effects: [{ type: "crit", chance: 0.3 }, { type: "edge", style: "aggro", pct: 0.4 }] },
+    tower:  { name: "TOWER SHIELD", style: "guard", why: "blocks part of the first hit every turn", effects: [{ type: "guard", amount: 6 }, { type: "edge", style: "guard", pct: 0.4 }] },
+    fang:   { name: "VAMPIRE FANG", style: "social", why: "heals you a little on every hit", effects: [{ type: "lifesteal", pct: 0.3 }, { type: "edge", style: "social", pct: 0.4 }] },
+    cloak:  { name: "SEER'S CLOAK", style: "mind", why: "makes you harder to hit", effects: [{ type: "evade", pct: 0.2 }, { type: "edge", style: "mind", pct: 0.4 }] },
+    dagger: { name: "VENOM DAGGER", style: "mind", why: "its Mind skills can poison", effects: [{ type: "rider", style: "mind", status: "poison", chance: 0.6 }, { type: "edge", style: "mind", pct: 0.4 }] },
+    blade:  { name: "BLADE", style: "aggro", why: "more damage with one style", effects: [{ type: "edge", style: "aggro", pct: 0.4 }], perStyle: true },
+  };
   const ITEM_RULES = {
     potion: [[{ when: { kind: "my_hp_below", value: 35 }, do: { item: true } }], [{ when: { kind: "my_hp_below", value: 50 }, do: { item: true } }]],
     ether: [[{ when: { kind: "my_energy_below", value: 2 }, do: { item: true } }]],
@@ -49,6 +58,14 @@
     quick: { screenTrain: 30, screenGames: 6, finalTrain: 60, finalGames: 12, finalSeeds: 1, topLoadouts: 2, finalists: 2, meta: 16, pathMilestones: 2, field: 3 },
   };
 
+  function weaponSkill(arch, level, style) {
+    const a = WEAPON_ARCHETYPES[arch];
+    const effects = a.effects.map((e) => (a.perStyle ? { ...e, style } : { ...e }));
+    const name = a.perStyle ? `${E.STYLE_INFO[style].label.toUpperCase()} ${a.name}` : a.name;
+    const v = E.fitSkill({ name, kind: "weapon", style: a.perStyle ? style : a.style, element: "none", effects }, level);
+    if (!v.skill || v.overBudget) return null;
+    return { ...v.skill, id: `pro_w_${arch}${a.perStyle ? "_" + style : ""}` };
+  }
   function archetypeSkill(arch, style, level, key) {
     const a = ARCHETYPES[arch];
     const v = E.fitSkill({ name: a.names[style], kind: "active", style, element: "none", effects: a.effects.map((e) => ({ ...e })) }, level);
@@ -67,12 +84,16 @@
   /** Everything this fighter could use at `level`, with what each costs in Cycles. */
   function options(ctx) {
     const { level, library = [], fighter } = ctx;
+    const unlocked = ctx.unlocked || E.unlockedFamilies({ beaten: ctx.beaten || [], codex: ctx.codex || [] });
+    const open = (sk) => sk && E.lockedIn(sk, unlocked).length === 0;   // forging needs the effect families unlocked
     const owned = new Map();
     for (const s of library) owned.set(s.id, s);
     for (const [id, s] of Object.entries(fighter.custom || {})) if (!owned.has(id)) owned.set(id, s);
     const legal = (s) => { const v = E.validateSkill(s, { level }); return v.skill && !v.overBudget ? { ...v.skill, id: s.id } : null; };
     const skills = { aggro: [], social: [], mind: [], guard: [] };
     for (const [id, s] of Object.entries(E.BASIC)) skills[s.style].push({ id, skill: null, style: s.style, cost: 0, label: s.name, kind: "basic" });
+    if (fighter.passive && !owned.has(fighter.passive.id)) owned.set(fighter.passive.id, fighter.passive);
+    if (fighter.weapon && !owned.has(fighter.weapon.id)) owned.set(fighter.weapon.id, fighter.weapon);
     for (const s of owned.values()) {
       if (s.kind !== "active") continue;
       const ok = legal(s);
@@ -80,17 +101,25 @@
     }
     for (const style of E.STYLES) for (const arch of Object.keys(ARCHETYPES)) {
       const sk = archetypeSkill(arch, style, level, `pro_${arch}_${style}`);
-      if (sk) skills[style].push({ id: sk.id, skill: sk, style, cost: ECON.forgeCost(sk), label: sk.name, kind: "forge", arch });
+      if (sk && open(sk)) skills[style].push({ id: sk.id, skill: sk, style, cost: ECON.forgeCost(sk), label: sk.name, kind: "forge", arch });
     }
     const passives = [{ id: null, skill: null, cost: 0, label: "none", kind: "none" }];
     for (const p of E.STARTER_PASSIVES) if (p.budget <= E.maxPassiveBudget(level)) passives.push({ id: p.id, skill: p, cost: 0, label: p.name, kind: "starter" });
     for (const s of owned.values()) if (s.kind === "passive") { const ok = legal(s); if (ok) passives.push({ id: ok.id, skill: ok, cost: 0, label: ok.name, kind: "owned" }); }
     for (const arch of Object.keys(PASSIVE_ARCHETYPES)) {
       const styles = PASSIVE_ARCHETYPES[arch].perStyle ? E.STYLES : [null];
-      for (const st of styles) { const p = passiveSkill(arch, level, st); if (p) passives.push({ id: p.id, skill: p, cost: ECON.forgeCost(p), label: p.name, kind: "forge", arch }); }
+      for (const st of styles) { const p = passiveSkill(arch, level, st); if (p && open(p)) passives.push({ id: p.id, skill: p, cost: ECON.forgeCost(p), label: p.name, kind: "forge", arch }); }
+    }
+    const weapons = [{ id: null, skill: null, cost: 0, label: "none", kind: "none" }];
+    for (const s of owned.values()) if (s.kind === "weapon") { const ok = legal(s); if (ok) weapons.push({ id: ok.id, skill: ok, cost: 0, label: ok.name, kind: "owned" }); }
+    if (unlocked.has("weapon:slot")) for (const arch of Object.keys(WEAPON_ARCHETYPES)) {
+      for (const st of WEAPON_ARCHETYPES[arch].perStyle ? E.STYLES : [null]) {
+        const w = weaponSkill(arch, level, st);
+        if (w && open(w)) weapons.push({ id: w.id, skill: w, cost: ECON.forgeCost(w), label: w.name, kind: "forge", arch });
+      }
     }
     const items = [null, ...Object.keys(E.ITEMS)];
-    return { skills, passives, items };
+    return { skills, passives, weapons, items, unlocked };
   }
 
   function statOptions(level, current) {
@@ -114,20 +143,28 @@
     const seen = new Set();
     for (const o of b.slots) if (!seen.has(o.id)) { seen.add(o.id); c += o.cost; }
     if (b.passive) c += b.passive.cost;
+    if (b.weapon) c += b.weapon.cost;
     if (b.item && !(ctx.inventory[b.item] > 0)) c += ECON.itemPrice(b.item);
     if (b.respec) c += ECON.PRICES.respec;
     return c;
   }
-  const keyOf = (b) => [b.slots.map((o) => o.id).join(","), b.passive ? b.passive.id : "-", b.item || "-", b.stats ? `${b.stats.power}/${b.stats.vitality}/${b.stats.speed}` : "-", JSON.stringify(b.rules || [])].join("|");
+  const keyOf = (b) => [b.slots.map((o) => o.id).join(","), b.passive ? b.passive.id : "-", b.weapon ? b.weapon.id : "-", b.item || "-", b.stats ? `${b.stats.power}/${b.stats.vitality}/${b.stats.speed}` : "-", JSON.stringify(b.rules || [])].join("|");
 
   function toFighter(base, b, level) {
     const custom = {};
     for (const o of b.slots) if (o.skill) custom[o.id] = o.skill;
-    let f = E.redesign(base, { moves: b.slots.map((o) => o.id), custom, passive: b.passive ? b.passive.skill : null, item: b.item || null });
+    let f = E.redesign(base, { moves: b.slots.map((o) => o.id), custom, passive: b.passive ? b.passive.skill : null, weapon: b.weapon ? b.weapon.skill : null, item: b.item || null });
     if (f.level !== level) { f.level = level; f.xp = E.xpForLevel(level); }
     f = E.setStats({ ...f, stats: { power: 0, vitality: 0, speed: 0 } }, b.stats || E.statsOf(base));
     f.rules = E.sanitizeRules(b.rules || [], f.moves);
     return f;
+  }
+
+  /** Does a build follow the rulebook's loadout clauses? */
+  function legalBuild(b) {
+    const custom = {};
+    for (const o of b.slots) if (o.skill) custom[o.id] = o.skill;
+    return E.validateLoadout({ moves: b.slots.map((o) => o.id), custom, passive: b.passive ? b.passive.skill : null, weapon: b.weapon ? b.weapon.skill : null }).length === 0;
   }
 
   // ---------- simulation ----------
@@ -148,7 +185,8 @@
 
   /** A stand-in for other players: random legal builds of this level and budget, each trained like a player would. */
   function syntheticField(level, balance, n, seed) {
-    const opts = options({ level, library: [], fighter: E.createFighter({ moves: ["fight", "talk", "strategize", "shield"] }) });
+    const beaten = E.RIVALS.filter((rv) => rv.level < level).map((rv) => rv.id);
+    const opts = options({ level, library: [], beaten, fighter: E.createFighter({ moves: ["fight", "talk", "strategize", "shield"] }) });
     const r = E.rng(seed), out = [];
     const statOpts = statOptions(level, { power: 0, vitality: 0, speed: 0 });
     for (let k = 0; k < n; k++) {
@@ -156,12 +194,14 @@
       do {
         slots = E.STYLES.map((st) => { const list = opts.skills[st]; return list[Math.floor(r() * list.length)]; });
         cost = slots.reduce((a, o) => a + o.cost, 0);
-      } while (cost > Math.max(balance, 60) && ++tries < 50);
+      } while ((cost > Math.max(balance, 60) || !legalBuild({ slots })) && ++tries < 80);
+      if (!legalBuild({ slots })) slots = E.STYLES.map((st) => opts.skills[st].find((o) => o.kind === "basic"));
       const custom = {};
       for (const o of slots) if (o.skill) custom[o.id] = o.skill;
       const passive = opts.passives[Math.floor(r() * opts.passives.length)];
       const item = r() < 0.5 ? Object.keys(E.ITEMS)[Math.floor(r() * 4)] : null;
-      let f = E.createFighter({ name: `FIELD ${k + 1}`, moves: slots.map((o) => o.id), custom, passive: passive.skill, item }, E.rng(seed + k));
+      const weapon = opts.weapons.length > 1 && r() < 0.6 ? opts.weapons[1 + Math.floor(r() * (opts.weapons.length - 1))].skill : null;
+      let f = E.createFighter({ name: `FIELD ${k + 1}`, moves: slots.map((o) => o.id), custom, passive: passive.skill, item, weapon }, E.rng(seed + k));
       f.level = level; f.xp = E.xpForLevel(level);
       f = E.setStats(f, statOpts[Math.floor(r() * statOpts.length)].stats);
       if (item) f.rules = E.sanitizeRules(ITEM_RULES[item][0], f.moves);
@@ -221,7 +261,8 @@
     const level = ctx.level || base.level || 1;
     const P = EFFORT[ctx.effort || "full"];
     const seed = (ctx.seed ?? 1) >>> 0;
-    const c = { ...ctx, level, inventory: ctx.inventory || {}, balance: Math.max(0, ctx.balance ?? 0), library: ctx.library || [] };
+    const c = { ...ctx, level, inventory: ctx.inventory || {}, balance: Math.max(0, ctx.balance ?? 0), library: ctx.library || [],
+                unlocked: ctx.unlocked || E.unlockedFamilies({ beaten: ctx.beaten || [], codex: ctx.codex || [] }) };
     const tick = makeYield(ctx.signal);
     const opts = options({ ...c, fighter: base });
     const bench = benchmark({ ...c, field: syntheticField(level, c.balance, P.field, seed + 77) });
@@ -234,6 +275,7 @@
     async function quickScore(b) {
       const k = keyOf(b);
       if (cache.has(k)) return cache.get(k);
+      if (!legalBuild(b)) { cache.set(k, -1); return -1; }   // breaks a clause: never a candidate
       await tick();
       const f = trainBurst(toFighter(base, b, level), P.screenTrain, seed + 1);
       const s = score(f, bench, P.screenGames, seed + 2, true);
@@ -244,18 +286,19 @@
     }
     const styleSlots = (moves) => moves.map((m) => { const sk = E.skillOf(base, m); return opts.skills[sk.style].find((o) => o.id === m) || { id: m, skill: base.custom && base.custom[m] ? { ...base.custom[m], id: m } : null, style: sk.style, cost: 0, label: sk.name, kind: "owned" }; });
     const curPassive = base.passive ? (opts.passives.find((p) => p.id === base.passive.id) || { id: base.passive.id, skill: base.passive, cost: 0, label: base.passive.name, kind: "owned" }) : null;
-    const current = { slots: styleSlots(base.moves), passive: curPassive && curPassive.id ? curPassive : null, item: base.item || null, stats: curStats, rules: base.rules || [], respec: false };
+    const curWeapon = base.weapon ? (opts.weapons.find((w) => w.id === base.weapon.id) || { id: base.weapon.id, skill: base.weapon, cost: 0, label: base.weapon.name, kind: "owned" }) : null;
+    const current = { slots: styleSlots(base.moves), passive: curPassive && curPassive.id ? curPassive : null, weapon: curWeapon, item: base.item || null, stats: curStats, rules: base.rules || [], respec: false };
 
     // Stage 1: basic loadouts that cover all four styles
     const basic = (st) => opts.skills[st].filter((o) => o.kind === "basic");
     const loadouts = [];
     for (const a of basic("aggro")) for (const s of basic("social")) for (const m of basic("mind")) for (const g of basic("guard")) loadouts.push([a, s, m, g]);
     const swaps = E.STYLES.reduce((n, st) => n + opts.skills[st].filter((o) => o.kind !== "basic").length, 0);
-    total = loadouts.length + P.topLoadouts * swaps + 81 + 16 * (P.topLoadouts - 1) + (P.finalists + 1) * (opts.passives.length + 8 + statOpts.length + 1) + (P.finalists + 2) * P.finalSeeds + P.pathMilestones * 12;
+    total = loadouts.length + P.topLoadouts * swaps + 81 + 16 * (P.topLoadouts - 1) + (P.finalists + 1) * (opts.passives.length + opts.weapons.length + 8 + statOpts.length + 1) + (P.finalists + 2) * P.finalSeeds + P.pathMilestones * 12;
     // screening uses an even spread (or the current points, if moving them would need a reset)
     const even = statOpts.find((o) => o.stats.power && o.stats.vitality && o.stats.speed && !o.respec) || statOpts.find((o) => !o.respec);
     const neutralStats = even || { stats: curStats, respec: false };
-    const plain = (slots) => ({ slots, passive: null, item: null, stats: neutralStats.stats, rules: [], respec: neutralStats.respec });
+    const plain = (slots) => ({ slots, passive: null, weapon: null, item: null, stats: neutralStats.stats, rules: [], respec: neutralStats.respec });
     progress("Screening loadouts");
     const s1 = [];
     for (const slots of loadouts) { s1.push({ slots, v: await quickScore(plain(slots)) }); progress("Screening loadouts"); }
@@ -283,7 +326,7 @@
       for (const a of perSlot[0]) for (const s of perSlot[1]) for (const m of perSlot[2]) for (const g of perSlot[3]) {
         const slots = [a, s, m, g];
         const b = plain(slots);
-        if (costOf(b, c) > c.balance + 80) continue;   // far beyond reach: skip
+        if (costOf(b, c) > c.balance + 80 || !legalBuild(b)) continue;   // far beyond reach, or breaks a clause
         combos.push({ slots, v: await quickScore(b), cost: costOf(b, c) });
         progress("Combining skills");
       }
@@ -306,9 +349,10 @@
         }
       };
       await tryAll(opts.passives.map((p) => ({ ...b, passive: p.id ? p : null })), "Choosing a passive");
+      if (opts.weapons.length > 1) await tryAll(opts.weapons.map((w) => ({ ...b, weapon: w.id ? w : null })), "Choosing a weapon");
       const itemVariants = [];
       for (const it of Object.keys(E.ITEMS)) for (const rules of ITEM_RULES[it]) itemVariants.push({ ...b, item: it, rules });
-      await tryAll(itemVariants.map((x) => ({ ...x, passive: b.passive })), "Choosing an item and rules");
+      await tryAll(itemVariants.map((x) => ({ ...x, passive: b.passive, weapon: b.weapon })), "Choosing an item and rules");
       await tryAll(statOpts.map((o) => ({ ...b, stats: o.stats, respec: o.respec })), "Spending stat points");
       const finisher = biggestHit(b.slots);
       if (finisher) await tryAll([{ ...b, rules: [...b.rules, { when: { kind: "their_hp_below", value: 25 }, do: { skill: finisher } }] }], "Adding a finisher rule");
@@ -345,9 +389,12 @@
     }
     const best = uniq.filter((x) => !x.dream && !x.isCurrent).sort((a, b) => b.overall - a.overall)[0];
     const cur = uniq.find((x) => x.isCurrent);
-    const winner = best && best.overall > cur.overall ? best : cur;
+    // a current build that breaks a clause can't be kept, however well it scores
+    const winner = best && (best.overall > cur.overall || !legalBuild(current)) ? best : cur;
     const dream = uniq.filter((x) => x.dream).sort((a, b) => b.overall - a.overall)[0];
 
+    progress("Planning practice");
+    const practice = await practicePlan(base, winner.b, level, seed, tick);
     progress("Planning the level-up path");
     const path = await levelPath(base, winner.b, { ...c, tick, P, seed });
     ctx.onProgress && ctx.onProgress(1, "Done");
@@ -359,6 +406,7 @@
       saveUpFor: dream && dream.overall > winner.overall + 0.03 ? { build: describeBuild(dream.b, c), score: summarize(dream) } : null,
       reasons: reasons(winner, cur, c),
       training: trainingPlan(winner),
+      practice,
       path,
     };
   }
@@ -390,10 +438,11 @@
     const forge = [];
     for (const o of b.slots) if (o.kind === "forge") forge.push({ ref: o.id, skill: o.skill, cost: o.cost, why: ARCHETYPES[o.arch].why });
     if (b.passive && b.passive.kind === "forge") forge.push({ ref: b.passive.id, skill: b.passive.skill, cost: b.passive.cost, why: PASSIVE_ARCHETYPES[b.passive.arch].why });
+    if (b.weapon && b.weapon.kind === "forge") forge.push({ ref: b.weapon.id, skill: b.weapon.skill, cost: b.weapon.cost, why: WEAPON_ARCHETYPES[b.weapon.arch].why });
     return {
       moves: b.slots.map((o) => o.id), names: b.slots.map((o) => o.label),
       skills: b.slots.map((o) => o.skill || null),
-      passive: b.passive ? b.passive.skill : null, item: b.item || null,
+      passive: b.passive ? b.passive.skill : null, weapon: b.weapon ? b.weapon.skill : null, item: b.item || null,
       buyItem: !!(b.item && !(c.inventory[b.item] > 0)),
       stats: { ...b.stats }, respec: !!b.respec, rules: E.clone(b.rules || []),
       forge, cost: costOf(b, c),
@@ -406,6 +455,7 @@
     for (const o of b.slots) if (o.kind === "forge") out.push(`${o.label}: ${ARCHETYPES[o.arch].why}.`);
     if (b.slots.some((o) => o.id === "shield")) out.push("BULWARK acts first and blocks damage, which wins the close turns.");
     if (b.passive) out.push(`${b.passive.label}: ${b.passive.kind === "forge" ? PASSIVE_ARCHETYPES[b.passive.arch].why : E.describeSkill(b.passive.skill).replace(/^Passive: /, "").replace(/\.$/, "")}.`);
+    if (b.weapon) out.push(`${b.weapon.label}: ${b.weapon.kind === "forge" ? WEAPON_ARCHETYPES[b.weapon.arch].why : E.describeSkill(b.weapon.skill).replace(/^Weapon: /, "").replace(/\.$/, "")}.`);
     if (b.item) out.push(`${E.ITEMS[b.item].name} with a rule (${E.describeRule(b.rules.find((r) => r.do.item) || { when: { kind: "phase_is", value: "endgame" }, do: { item: true } }, { item: b.item }).replace(/^If /, "if ").replace(/\.$/, "")}), so it's never wasted or forgotten.`);
     const s = b.stats, n = s.power + s.vitality + s.speed;
     if (n) out.push(`Stats ${s.power} Power / ${s.vitality} Vitality / ${s.speed} Speed.${s.power && s.vitality ? " Power and Vitality multiply each other, so a spread beats piling into one." : ""}`);
@@ -422,6 +472,26 @@
     return tips;
   }
 
+  /** How much practice the new files need before rival and arena battles, and about how many drill rounds that is. */
+  async function practicePlan(base, b, level, seed, tick) {
+    const out = [];
+    const f0 = toFighter(base, b, level);
+    for (const o of b.slots) {
+      if (!o.skill || E.isProven(f0, o.skill)) continue;
+      await tick();
+      const probe = E.train(E.clone(f0), "brawler", 3, { rng: E.rng(seed + 9), drill: o.id }).fighter;
+      const perRound = Math.max(1, (E.practiceCount(probe, o.skill) - E.practiceCount(f0, o.skill)) / 3);
+      const need = E.practiceNeeded(o.skill) - E.practiceCount(f0, o.skill);
+      out.push({ ref: o.id, name: o.skill.name, kind: "active", need, rounds: Math.ceil(need / perRound), how: "drill" });
+    }
+    for (const g of [b.passive, b.weapon]) {
+      if (!g || !g.skill || E.isProven(f0, g.skill)) continue;
+      const need = E.practiceNeeded(g.skill) - E.practiceCount(f0, g.skill);
+      out.push({ ref: g.id, name: g.skill.name, kind: g.skill.kind, need, rounds: need, how: "practice battles" });
+    }
+    return out;
+  }
+
   /** Look-ahead: at each milestone level, re-forge this build's skills at the higher power limit,
    *  test the best new skill for each basic slot there, and suggest how to spend the new points. */
   async function levelPath(base, b, k) {
@@ -431,8 +501,13 @@
     const totalPts = Math.max(1, b.stats.power + b.stats.vitality + b.stats.speed);
     const out = [];
     for (const L of marks) {
-      const optsL = options({ level: L, library, fighter: base });
-      const beaten = E.RIVALS.filter((r) => r.level < L).map((r) => r.id);
+      const beaten = [...new Set([...(k.beaten || []), ...E.RIVALS.filter((r) => r.level < L).map((r) => r.id)])];
+      const optsL = options({ level: L, library, fighter: base, beaten, codex: k.codex || [] });
+      // badges you'd earn on the way to this level
+      const prev = out.length ? out[out.length - 1].level : level;
+      const badges = E.RIVALS.filter((r) => r.level < L && r.level >= prev && !(k.beaten || []).includes(r.id)).map((r) => ({
+        rival: r.name, level: r.level, unlocks: Object.entries(E.FAMILIES).filter(([, rv]) => rv === r.id).map(([key]) => E.familyLabel(key)),
+      }));
       const benchL = benchmark({ level: L, beaten, arena: [], field: syntheticField(L, 200, 3, seed + 7000 + L) });
       const n = E.statPointsFor(L);
       const stats = { power: Math.round(n * b.stats.power / totalPts), vitality: Math.round(n * b.stats.vitality / totalPts), speed: 0 };
@@ -443,7 +518,8 @@
         return sk ? { ...o, skill: sk, label: sk.name, cost: ECON.forgeCost(sk) } : o;
       };
       const passive = b.passive && b.passive.kind === "forge" ? (optsL.passives.find((p) => p.id === b.passive.id) || b.passive) : b.passive;
-      const bL = { ...b, slots: b.slots.map(refit), passive, stats, respec: false };
+      const weapon = b.weapon && b.weapon.kind === "forge" ? (optsL.weapons.find((w) => w.id === b.weapon.id) || b.weapon) : b.weapon;
+      const bL = { ...b, slots: b.slots.map(refit), passive, weapon, stats, respec: false };
       const at = async (x) => {
         await tick();
         const f = trainBurst(toFighter(base, x, L), P.screenTrain, seed + 5000 + L);
@@ -456,6 +532,7 @@
         for (const o of optsL.skills[bL.slots[i].style]) {
           if (o.kind !== "forge" || bL.slots.some((x) => x.arch === o.arch)) continue;
           const slots = bL.slots.slice(); slots[i] = o;
+          if (!legalBuild({ ...bL, slots })) continue;
           const v = await at({ ...bL, slots });
           if (v > keep + 0.02 && (!best || v > best.v)) best = { v, i, o };
         }
@@ -468,10 +545,10 @@
       });
       if (best) forge.unshift({ name: best.o.skill.name, style: best.o.style, budget: best.o.skill.budget, cost: best.o.cost, upgrade: false, replaces: bL.slots[best.i].label, describe: E.describeSkill(best.o.skill), gain: r2(best.v - keep) });
       const rival = E.RIVALS.find((r) => r.level >= L) || E.RIVALS[E.RIVALS.length - 1];
-      out.push({ level: L, cap: E.maxSkillBudget(L), forge, stats, rival: rival.name });
+      out.push({ level: L, cap: E.maxSkillBudget(L), forge, stats, rival: rival.name, badges });
     }
     return out;
   }
 
-  return { optimize, options, statOptions, benchmark, syntheticField, ARCHETYPES, PASSIVE_ARCHETYPES, ITEM_RULES, EFFORT, Cancelled, costOf };
+  return { optimize, options, statOptions, benchmark, syntheticField, legalBuild, ARCHETYPES, PASSIVE_ARCHETYPES, WEAPON_ARCHETYPES, ITEM_RULES, EFFORT, Cancelled, costOf };
 });

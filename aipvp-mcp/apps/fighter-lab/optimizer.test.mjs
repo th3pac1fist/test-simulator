@@ -127,8 +127,8 @@ test("balance: forged archetypes of equal power win about equally often", () => 
   const archs = Object.keys(O.ARCHETYPES);
   const perLevel = {};
   for (const L of [4, 20]) {
-    const opts = O.options({ level: L, fighter: E.createFighter({ moves: ["fight", "talk", "strategize", "shield"] }), library: [] });
-    const base = { aggro: "fight", social: "negotiate", mind: "code", guard: "shield" };
+    const opts = O.options({ level: L, fighter: E.createFighter({ moves: ["fight", "talk", "strategize", "shield"] }), library: [], unlocked: new Set(Object.keys(E.FAMILIES)) });
+    const base = { aggro: "fight", social: "negotiate", mind: "code", guard: "observe" };   // plain guard: no clause clashes
     const make = (style, arch, seed) => {
       const o = opts.skills[style].find((x) => x.arch === arch);
       let f = E.createFighter({ name: arch, moves: E.STYLES.map((st) => (st === style ? o.id : base[st])), custom: { [o.id]: o.skill } }, E.rng(seed));
@@ -153,5 +153,19 @@ test("balance: forged archetypes of equal power win about equally often", () => 
   for (const a of archs) {
     const avg = (perLevel[4][a] + perLevel[20][a]) / 2;
     assert.ok(avg > 0.35 && avg < 0.65, `${a} wins ${avg.toFixed(2)} on average across levels`);
+  }
+});
+
+test("pro build: only unlocked families, always within the clauses, with a practice plan", async () => {
+  for (const beaten of [[], ["sal", "velvet", "grid"]]) {
+    const unlocked = E.unlockedFamilies({ beaten });
+    const res = await O.optimize({ fighter: quill(), balance: 200, beaten, seed: 5, effort: "quick" });
+    const b = res.build;
+    for (const x of b.forge) assert.deepEqual(E.lockedIn(x.skill, unlocked), [], `${x.skill.name} uses only unlocked families`);
+    if (!unlocked.has("weapon:slot")) assert.equal(b.weapon, null, "no weapon before Sal's badge");
+    const custom = Object.fromEntries(b.skills.filter(Boolean).map((s) => [s.id, s]));
+    assert.deepEqual(E.validateLoadout({ moves: b.moves, custom, passive: b.passive, weapon: b.weapon }), []);
+    const fresh = [...b.forge.map((x) => x.ref)];
+    for (const ref of fresh) assert.ok(res.practice.some((p) => p.ref === ref && p.need > 0 && p.rounds > 0), `practice plan for ${ref}`);
   }
 });

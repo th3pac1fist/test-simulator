@@ -113,16 +113,41 @@ The creatures, move names and art are original to this project. The page only bo
     - forging, items, stat resets.
   - **Ledger:** append-only, and the balance can't go negative.
   - **No cash value:** Cycles can't be transferred. [`docs/CRYPTO.md`](docs/CRYPTO.md) is the plan for a real token later.
+- **Rulebook** (`RULEBOOK` and `validateLoadout` in `engine.js`, shown in the Forge tab):
+  - **File rules:** only listed effects, at most 3 per file, numbers within range, and power within the level limit. The game sets the price.
+  - **Unlocks:**
+    - Everyone starts with damage, burn, shield and heal skills, plus regen and starting-shield passives.
+    - Each rival's first win earns a **badge** that unlocks more (like Pokémon gym badges). Sal's badge opens the weapon slot.
+    - The **Codex** sells any family early for `60 + 15 × that rival's level` Cycles (like Hearthstone crafting).
+    - Real wins can **drop** a ready-made blueprint into your library; duplicates become Cycles (like Clash Royale chests).
+  - **Weapons:** a new slot and a fourth file type, with these effects:
+    - edge (+damage for one style);
+    - burn or poison riders;
+    - critical hits;
+    - lifesteal;
+    - guard (blocks part of the first hit each turn);
+    - evade.
+  - **Practice before battle** (like Final Fantasy IX's AP):
+    - New files are "in training" until practiced: skills need `10 + 8 × power` uses, passives and weapons `3 + 2 × power` practice battles.
+    - Sparring by hand counts double, and a Drill makes the fighter use one skill whenever it can.
+    - Rival and arena battles need a battle-ready loadout. Once proven, a file stays battle-ready.
+  - **Clauses** (like Smogon's competitive Pokémon rules), enforced in loadouts, battles and the arena:
+    - one stun skill per loadout;
+    - no two skills sharing a special effect;
+    - at most 50% of max HP healed per battle;
+    - one action deals at most 40% of the target's max HP.
 - **Balance, checked by simulation** (`engine.test.mjs`, `optimizer.test.mjs`):
   - Power, Vitality and Speed are all percentages, so they're worth about the same at levels 4, 15 and 35.
   - The Potion helps about as much as the Smoke Bomb.
   - Effect prices (`PRICE` in `engine.js`) are calibrated so forged skills of equal power win about equally often. Shields are strongest early on and weaken effects late in the game.
+  - Weapon prices (`WPRICE`) are calibrated the same way.
 - **Pro build** (`optimizer.js`, owner only):
   - **Who sees it:** the artifact's owner (`user.isOwner()`) gets a Pro build box in the Design tab. It only hides the UI: every viewer gets the same page code. The builds it makes are legal anyway, and arena skills are re-checked when they arrive.
-  - **What it can use:** only what's legal at the fighter's level and affordable with your Cycles:
+  - **What it can use:** only what's legal at the fighter's level, unlocked, within the clauses, and affordable with your Cycles:
     - basic and owned skills;
     - skills to forge, from archetypes scaled to your power limit;
-    - passives, items paired with matching rules, and stat splits.
+    - passives, weapons, items paired with matching rules, and stat splits.
+  - **Practice plan:** its result includes how many drill rounds the new files need.
   - **How it searches:** in stages:
     1. Screen every loadout covering the four styles.
     2. Try forged skills one slot at a time, then combine the best.

@@ -357,7 +357,7 @@ test("fighters saved by rules v2 are upgraded without losing progress", () => {
   const old = { id: "fold1", name: "OLDIE", moves: BALANCED, level: 6, xp: 1000, personality: { aggression: 0.5, caution: 0.5, creativity: 0.5, loyalty: 0.5 },
                 design: {}, uses: { fight: 50 }, brain: { W, b: Array(15).fill(0) }, record: { w: 3, l: 1, d: 0 }, version: 2, persona: "p", playbook: "- x" };
   const g = E.upgradeFighter(old);
-  assert.equal(g.version, 3);
+  assert.equal(g.version, 4);
   assert.equal(g.brain.W.length, 30); assert.equal(g.brain.W[0].length, 5);
   assert.equal(g.brain.W[3][0], W[1][0], "old weights copied to both HP halves");
   assert.deepEqual([g.xp, g.level, g.uses.fight, g.persona], [1000, 6, 50, "p"]);
@@ -390,6 +390,7 @@ test("real battles give 3x XP; rivals are deterministic with kits", () => {
 test("published fighters are re-validated: skills re-priced, stats and rules checked", () => {
   const fb = E.validateSkill({ ...FIREBALL, id: "fireball" }).skill;
   const mine = E.createFighter({ name: "PUB", moves: ["fireball", "talk", "code", "shield"], custom: { fireball: fb } });
+  mine.proven = ["fireball"];                                         // only battle-ready fighters can enter the arena
   const pub = { ...E.toPublic(mine), level: 20 };                      // a level-20 fighter may carry stronger skills
   pub.custom.fireball.energy = 0;                                      // hand-edited to be free
   pub.custom.fireball.effects[0].power = 999;                         // and overpowered
@@ -425,4 +426,169 @@ test("aipvp command is shell-safe", () => {
   const f = E.createFighter({ name: "O'BRIEN", moves: BALANCED });
   assert.equal(E.aipvpCommand(f),
     "aipvp agent create --name 'O'\\''BRIEN' --skills fight,talk,strategize,shield --aggression 0.50 --caution 0.50 --creativity 0.50 --loyalty 0.50");
+});
+
+
+// ---------------------------------------------------------------- rulebook (v4)
+const FIRE = (level = 20) => ({ ...E.validateSkill({ name: "FIREBALL", kind: "active", style: "aggro", effects: [{ type: "damage", power: 3 }, { type: "burn", chance: 0.3, damage: 2, turns: 3 }] }, { level }).skill, id: "sk_fire" });
+
+test("clauses: one stun skill, no shared special effects; plain attacks are fine", () => {
+  const stun = (id) => ({ ...E.validateSkill({ name: id, style: "mind", effects: [{ type: "damage", power: 2 }, { type: "stun", chance: 0.3 }] }).skill, id });
+  const f = E.createFighter({ moves: ["s1", "s2", "talk", "fight"], custom: { s1: stun("s1"), s2: stun("s2") } });
+  assert.match(E.validateLoadout(f).join(" "), /Stun clause/);
+  const shield = { ...E.validateSkill({ name: "AEGIS", style: "mind", effects: [{ type: "shield", amount: 6, turns: 2 }] }).skill, id: "aegis" };
+  const g = E.createFighter({ moves: ["aegis", "shield", "talk", "fight"], custom: { aegis: shield } });
+  assert.match(E.validateLoadout(g).join(" "), /No duplicates: AEGIS and BULWARK both use shield/);
+  assert.deepEqual(E.validateLoadout(E.createFighter({ moves: ["fight", "talk", "code", "observe"] })), [], "plain attacks never clash");
+  for (const rv of E.RIVALS) assert.deepEqual(E.validateLoadout(E.rivalFighter(rv.id)), [], `${rv.name} follows the clauses`);
+  for (const p of E.PARTNERS.filter((x) => x.moves)) assert.deepEqual(E.validateLoadout({ moves: p.moves, custom: {} }), [], `${p.name} follows the clauses`);
+});
+
+test("heal cap: at most half of max HP healed per battle, from every source", () => {
+  const healer = { ...E.validateSkill({ name: "MEND", style: "guard", effects: [{ type: "heal", amount: 20 }] }).skill, id: "mend" };
+  const f = E.createFighter({ moves: ["mend", "talk", "fight", "code"], custom: { mend: healer }, item: "potion" });
+  const st = E.newBattle(f, E.createFighter({ moves: BALANCED })), r = E.rng(3);
+  let healed = 0;
+  for (let t = 0; t < 8 && !st.over; t++) {
+    st.side[0].hp = 5; st.side[0].energy = 10; st.side[0].cooldowns = {};
+    const rec = E.resolveTurn(st, [t === 0 ? { kind: "item" } : { kind: "skill", skill: "mend" }, { kind: "skill", skill: "talk" }], r);
+    healed += rec.actions[0].healed;
+  }
+  assert.ok(Math.abs(healed - st.side[0].max * E.CLAUSES.healCap) < 0.05, `healed ${healed} of a ${st.side[0].max * E.CLAUSES.healCap} cap`);
+});
+
+test("one-hit cap: one action can't deal more than 40% of max HP", () => {
+  const nuke = { ...E.validateSkill({ name: "NUKE", style: "aggro", effects: [{ type: "damage", power: 6, hits: 2 }, { type: "focus", mult: 2 }] }).skill, id: "nuke" };
+  const a = E.setStats({ ...E.createFighter({ moves: ["nuke", "talk", "code", "shield"], custom: { nuke } }), level: 50, xp: E.xpForLevel(50) }, { power: 49, vitality: 0, speed: 0 });
+  const b = E.createFighter({ moves: BALANCED });
+  const st = E.newBattle(a, b), r = E.rng(2);
+  st.turn = 12; st.side[0].energy = 10; st.side[0].focus = 2;
+  const rec = E.resolveTurn(st, [{ kind: "skill", skill: "nuke" }, { kind: "skill", skill: "talk" }], r);
+  assert.ok(rec.actions[0].points <= st.side[1].max * E.CLAUSES.oneHitCap + 0.01 && rec.actions[0].capped, `${rec.actions[0].points} of ${st.side[1].max}`);
+});
+
+test("unlocks: starters for everyone, badges from rivals, Codex purchases", () => {
+  const none = E.unlockedFamilies({ beaten: [], codex: [] });
+  for (const k of ["active:damage", "active:burn", "active:shield", "active:heal", "passive:regen", "passive:start_shield"]) assert.ok(none.has(k), k);
+  assert.ok(!none.has("active:stun") && !none.has("weapon:slot"));
+  assert.ok(E.unlockedFamilies({ beaten: ["sal"] }).has("weapon:slot"), "Sal's badge opens the weapon slot");
+  assert.ok(E.unlockedFamilies({ beaten: [], codex: ["active:stun"] }).has("active:stun"), "bought early");
+  const stunner = E.validateSkill({ name: "ZAP", effects: [{ type: "damage", power: 2 }, { type: "stun", chance: 0.3 }] }).skill;
+  assert.deepEqual(E.lockedIn(stunner, none).map((x) => [x.key, x.rival]), [["active:stun", "ORACLE"]]);
+  assert.deepEqual(E.lockedIn(FIRE(), none), [], "the fireball works from day one");
+  const sword = E.validateSkill({ name: "FLAME SWORD", kind: "weapon", effects: [{ type: "rider", style: "aggro", status: "burn", chance: 0.3 }] }).skill;
+  assert.deepEqual(E.lockedIn(sword, none).map((x) => x.key), ["weapon:slot"], "every weapon needs the slot first");
+  assert.deepEqual(E.lockedIn(sword, E.unlockedFamilies({ beaten: ["sal"] })), []);
+  for (const rv of Object.values(E.FAMILIES)) assert.ok(rv === null || E.RIVALS.some((x) => x.id === rv));
+});
+
+test("practice: new files are in training until used enough; drills and hand sparring speed it up", () => {
+  const fire = FIRE(1);
+  const need = E.practiceNeeded(fire);
+  assert.equal(need, Math.round(10 + 8 * fire.budget));
+  assert.equal(E.practiceNeeded(E.BASIC.fight), 0);
+  let f = E.createFighter({ moves: ["sk_fire", "talk", "code", "shield"], custom: { sk_fire: fire } });
+  assert.equal(E.readiness(f).ready, false);
+  assert.deepEqual(E.readiness(f).pending.map((x) => [x.name, x.have, x.need]), [["FIREBALL", 0, need]]);
+  const normal = E.train(f, "brawler", 3, { rng: E.rng(1) }).fighter.uses.sk_fire;
+  const drilled = E.train(f, "brawler", 3, { rng: E.rng(1), drill: "sk_fire" }).fighter;
+  assert.ok(drilled.uses.sk_fire > normal, `drill ${drilled.uses.sk_fire} vs normal ${normal}`);
+  f = E.train(f, "brawler", 30, { rng: E.rng(2), drill: "sk_fire" }).fighter;
+  assert.ok(E.readiness(f).ready && f.proven.includes("sk_fire"), "battle-ready after a drill");
+  // proven for good: a later reset of the counter doesn't take it away
+  f.uses.sk_fire = 0;
+  assert.ok(E.isProven(f, fire));
+  // hand sparring counts double
+  const g = E.createFighter({ moves: ["sk_fire", "talk", "code", "shield"], custom: { sk_fire: fire } });
+  const sp = E.newSpar(g, "brawler");
+  sp.state.side[0].energy = 10;
+  E.sparTurn(sp, 0, E.rng(1));
+  assert.equal(sp.state.side[0].f.uses.sk_fire, 2);
+});
+
+test("weapons: a fourth file type with its own slot, effects and power limit", () => {
+  const raw = { name: "VAMPIRE FANG", kind: "weapon", effects: [{ type: "lifesteal", pct: 0.3 }, { type: "edge", style: "aggro", pct: 0.4 }, { type: "nuke", pct: 1 }] };
+  const v = E.validateSkill(raw, { level: 50 });
+  assert.equal(v.skill.kind, "weapon");
+  assert.deepEqual(v.skill.effects.map((e) => e.type), ["lifesteal", "edge"], "unknown effects dropped");
+  assert.equal(v.skill.energy, 0);
+  assert.ok(E.validateSkill(raw, { level: 1 }).overBudget, "too strong for level 1");
+  assert.match(E.describeSkill(v.skill), /^Weapon: heals you for 30% of the damage you deal/);
+  // lifesteal and edge work in battle
+  const fang = { ...v.skill, id: "w_fang" };
+  const a = E.createFighter({ moves: BALANCED, weapon: fang }), b = E.createFighter({ moves: BALANCED });
+  const st = E.newBattle(a, b), r = E.rng(4);
+  st.side[0].hp = 20;
+  const rec = E.resolveTurn(st, [{ kind: "skill", skill: "fight" }, { kind: "skill", skill: "talk" }], r);
+  assert.ok(rec.actions[0].healed > 0, "lifesteal heals");
+  // rider: a Flame Sword's aggro skills can burn
+  const sword = { ...E.validateSkill({ name: "FLAME SWORD", kind: "weapon", effects: [{ type: "rider", style: "aggro", status: "burn", chance: 0.6 }] }).skill, id: "w_sword" };
+  let burned = 0;
+  for (let k = 0; k < 40; k++) {
+    const s2 = E.newBattle(E.createFighter({ moves: BALANCED, weapon: sword }), E.createFighter({ moves: BALANCED }));
+    const t = E.resolveTurn(s2, [{ kind: "skill", skill: "fight" }, { kind: "skill", skill: "talk" }], E.rng(k));
+    if (t.actions[0].applied.includes("burn (weapon)")) burned++;
+  }
+  assert.ok(burned > 12 && burned < 36, `${burned}/40 burned`);
+  // weapons survive save and load, and are practiced in battles
+  const up = E.upgradeFighter({ ...a, version: 3, proven: undefined });
+  assert.equal(up.weapon.name, "VAMPIRE FANG");
+  assert.ok(up.proven.includes("w_fang"), "files equipped before v4 are grandfathered");
+  const fresh = E.createFighter({ moves: BALANCED, weapon: fang });
+  assert.equal(E.readiness(fresh).ready, false);
+  const trained = E.train(fresh, "brawler", E.practiceNeeded(fang), { rng: E.rng(1) }).fighter;
+  assert.ok(E.readiness(trained).ready, "practice battles prove a weapon");
+});
+
+test("arena: clause breakers and untrained files are turned away", () => {
+  const shield = { ...E.validateSkill({ name: "AEGIS", style: "mind", effects: [{ type: "shield", amount: 6, turns: 2 }] }).skill, id: "aegis" };
+  const dup = E.createFighter({ name: "DUP", moves: ["aegis", "shield", "talk", "fight"], custom: { aegis: shield } });
+  dup.proven = ["aegis"];
+  assert.equal(E.sanitizePublic(E.toPublic(dup), "u_1"), null, "duplicate shields");
+  const green = E.createFighter({ name: "GREEN", moves: ["sk_fire", "talk", "code", "shield"], custom: { sk_fire: FIRE(1) } });
+  assert.equal(E.sanitizePublic(E.toPublic(green), "u_1"), null, "fireball still in training");
+  green.proven = ["sk_fire"];
+  assert.ok(E.sanitizePublic(E.toPublic(green), "u_1"));
+});
+
+test("balance: weapons of equal power win about equally often", () => {
+  const BUDGET = 1.5;
+  const W = {
+    edge: () => ({ type: "edge", style: "aggro", pct: BUDGET / E.WPRICE.edge }),
+    rider: () => ({ type: "rider", style: "aggro", status: "burn", chance: BUDGET / E.WPRICE.rider }),
+    crit: () => ({ type: "crit", chance: BUDGET / E.WPRICE.crit }),
+    lifesteal: () => ({ type: "lifesteal", pct: BUDGET / E.WPRICE.lifesteal }),
+    guard: () => ({ type: "guard", amount: BUDGET / E.WPRICE.guard }),
+    evade: () => ({ type: "evade", pct: BUDGET / E.WPRICE.evade }),
+  };
+  const keys = Object.keys(W);
+  const avg = Object.fromEntries(keys.map((k) => [k, 0]));
+  for (const L of [5, 25]) {
+    const tally = Object.fromEntries(keys.map((k) => [k, 0]));
+    let games = 0;
+    for (const mv of [["fight", "negotiate", "code", "shield"], ["fight", "debate", "strategize", "analyze"]]) for (const seed of [1, 2]) {
+      const fs = Object.fromEntries(keys.map((k) => {
+        const w = { ...E.validateSkill({ name: k, kind: "weapon", effects: [W[k]()] }).skill, id: "w_" + k };
+        let f = E.createFighter({ name: k, moves: mv, weapon: w }, E.rng(seed * 10));
+        f.level = L; f.xp = E.xpForLevel(L);
+        const n = L - 1, a = Math.floor(n / 3);
+        f = E.setStats(f, { power: a, vitality: a, speed: n - 2 * a });
+        const r = E.rng(seed * 10 + 1);
+        for (let i = 0; i < 150; i++) E.fight(f, E.partnerFighter(TRAIN5[i % 5], f), { rng: r, learnA: true });
+        return [k, f];
+      }));
+      for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++) {
+        const r = E.rng(seed * 100 + i * 9 + j); let s = 0;
+        for (let g = 0; g < 20; g++) s += score(E.fight(E.clone(fs[keys[i]]), E.clone(fs[keys[j]]), { rng: r }));
+        tally[keys[i]] += s / 20; tally[keys[j]] += 1 - s / 20;
+      }
+      games += keys.length - 1;
+    }
+    for (const k of keys) {
+      const w = tally[k] / games;
+      avg[k] += w / 2;
+      assert.ok(w > 0.2 && w < 0.8, `L${L} ${k} wins ${w.toFixed(2)}`);
+    }
+  }
+  for (const k of keys) assert.ok(avg[k] > 0.33 && avg[k] < 0.67, `${k} wins ${avg[k].toFixed(2)} across levels`);
 });

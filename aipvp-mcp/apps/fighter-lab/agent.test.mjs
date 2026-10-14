@@ -250,3 +250,20 @@ test("pro build mind: only game data in the prompt, and the reply is cleaned", a
   bad.json = bad;
   await assert.rejects(A.writeMind(bad, f, report), (e) => e.code === "invalid_reply");
 });
+
+test("drafts only offer unlocked effects and drop locked ones Claude adds anyway; weapons can be drafted", async () => {
+  const none = E.unlockedFamilies({ beaten: [] });
+  const p = A.draftPrompt("a stunning blow", "active", 5, none);
+  assert.doesNotMatch(p, /^- stun/m, "stun isn't offered before Oracle's badge");
+  assert.match(p, /^- burn/m);
+  const fake = async () => ({ name: "Zapper", style: "mind", effects: [{ type: "damage", power: 4 }, { type: "stun", chance: 0.5 }], why: "zap" });
+  fake.json = fake;
+  const d = await A.draftSkill(fake, "zap", "active", 5, null, none);
+  assert.deepEqual(d.skill.effects.map((e) => e.type), ["damage"]);
+  const sword = async () => ({ name: "Flame Sword", style: "aggro", effects: [{ type: "rider", style: "aggro", status: "burn", chance: 0.6 }, { type: "edge", style: "aggro", pct: 0.4 }], why: "fire" });
+  sword.json = sword;
+  const w = await A.draftSkill(sword, "a flaming sword", "weapon", 5, null, E.unlockedFamilies({ beaten: ["sal"] }));
+  assert.equal(w.skill.kind, "weapon");
+  assert.ok(w.skill.budget <= E.maxWeaponBudget(5));
+  assert.match(A.draftPrompt("x", "weapon", 5, E.unlockedFamilies({ beaten: ["sal"] })), /^You design a weapon/);
+});

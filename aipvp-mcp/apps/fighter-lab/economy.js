@@ -104,7 +104,76 @@
     return { wallet: x, amount };
   }
 
+  // ---------- Codex: unlock an effect family early (the rival badge is the cheap path) ----------
+  function codexPrice(familyKey) {
+    const rv = E.RIVALS.find((r) => r.id === E.FAMILIES[familyKey]);
+    return rv ? 60 + 15 * rv.level : 0;
+  }
+
+  // ---------- Drops: ready-made blueprints from real wins (never from practice) ----------
+  // Each is written at the top of its effects' ranges and fitted to the winner's level, so it's always legal.
+  const BLUEPRINTS = [
+    { name: "EMBER BOLT", kind: "active", style: "aggro", element: "fire", effects: [{ type: "damage", power: 6 }, { type: "burn", chance: 1, damage: 4, turns: 4 }] },
+    { name: "IRON WALL", kind: "active", style: "guard", element: "earth", effects: [{ type: "shield", amount: 12, turns: 3 }, { type: "damage", power: 6 }] },
+    { name: "MENDING LIGHT", kind: "active", style: "guard", element: "light", effects: [{ type: "heal", amount: 20 }, { type: "damage", power: 3 }] },
+    { name: "HEAVY BLOW", kind: "active", style: "mind", element: "tech", effects: [{ type: "damage", power: 6, hits: 2 }] },
+    { name: "SAPPING WORD", kind: "active", style: "social", element: "shadow", effects: [{ type: "damage", power: 6 }, { type: "weaken", pct: 0.5, turns: 3 }] },
+    { name: "DRAIN PULSE", kind: "active", style: "social", element: "tech", effects: [{ type: "damage", power: 6 }, { type: "energy_drain", amount: 3 }] },
+    { name: "DEEP FOCUS", kind: "active", style: "mind", element: "spirit", effects: [{ type: "damage", power: 6 }, { type: "focus", mult: 2 }] },
+    { name: "CHARGE UP", kind: "active", style: "mind", element: "storm", effects: [{ type: "damage", power: 6 }, { type: "energy_gain", amount: 3 }] },
+    { name: "RENEWAL", kind: "active", style: "guard", element: "water", effects: [{ type: "regen", heal: 8, every: 1, turns: 6 }, { type: "cleanse" }] },
+    { name: "LIFE LEECH", kind: "active", style: "social", element: "shadow", effects: [{ type: "damage", power: 6 }, { type: "drain", pct: 0.6 }] },
+    { name: "THUNDER CLAP", kind: "active", style: "aggro", element: "storm", effects: [{ type: "damage", power: 6 }, { type: "stun", chance: 0.6 }] },
+    { name: "VENOM STRIKE", kind: "active", style: "mind", element: "poison", effects: [{ type: "damage", power: 6 }, { type: "poison", chance: 1, stacks: 2 }] },
+    { name: "WARM SPRING", kind: "passive", style: "guard", element: "water", effects: [{ type: "regen", heal: 6, every: 1 }] },
+    { name: "STONE SKIN", kind: "passive", style: "guard", element: "earth", effects: [{ type: "start_shield", amount: 12 }] },
+    { name: "SHARP TONGUE", kind: "passive", style: "social", element: "light", effects: [{ type: "style_boost", style: "social", pct: 0.5 }] },
+    { name: "DYNAMO", kind: "passive", style: "mind", element: "tech", effects: [{ type: "energy_flow", amount: 2, every: 1 }] },
+    { name: "BRAMBLE HIDE", kind: "passive", style: "guard", element: "earth", effects: [{ type: "thorns", pct: 0.4 }] },
+    { name: "FLAME SWORD", kind: "weapon", style: "aggro", element: "fire", effects: [{ type: "rider", style: "aggro", status: "burn", chance: 0.6 }, { type: "edge", style: "aggro", pct: 0.4 }] },
+    { name: "WAR AXE", kind: "weapon", style: "aggro", element: "earth", effects: [{ type: "crit", chance: 0.3 }, { type: "edge", style: "aggro", pct: 0.4 }] },
+    { name: "TOWER SHIELD", kind: "weapon", style: "guard", element: "earth", effects: [{ type: "guard", amount: 6 }, { type: "edge", style: "guard", pct: 0.4 }] },
+    { name: "VAMPIRE FANG", kind: "weapon", style: "social", element: "shadow", effects: [{ type: "lifesteal", pct: 0.3 }, { type: "edge", style: "social", pct: 0.4 }] },
+    { name: "SEER'S CLOAK", kind: "weapon", style: "mind", element: "spirit", effects: [{ type: "evade", pct: 0.2 }, { type: "edge", style: "mind", pct: 0.4 }] },
+    { name: "VENOM DAGGER", kind: "weapon", style: "mind", element: "poison", effects: [{ type: "rider", style: "mind", status: "poison", chance: 0.6 }, { type: "edge", style: "mind", pct: 0.4 }] },
+  ];
+  const DROP_CHANCE = { rivalFirst: 1, rival: 0.2, arena: 0.15 };
+  const RARITY = {
+    common: { levelBack: 8, refund: 10 },   // fitted a few levels below yours: a bit weaker than you could forge
+    rare: { levelBack: 3, refund: 20 },
+    epic: { levelBack: 0, refund: 35 },     // full power for your level; weapons come at this rarity
+  };
+  function rarityFor(opponentLevel, r) {
+    const epic = Math.min(0.35, 0.05 + opponentLevel / 120), rare = 0.35;
+    const u = r();
+    return u < epic ? "epic" : u < epic + rare ? "rare" : "common";
+  }
+  /**
+   * Maybe drop a blueprint after a real win.
+   * ctx: { source: "rivalFirst"|"rival"|"arena", opponentLevel, level, unlocked: Set, owned: [files], prefer: familyKey?, rng }
+   * Returns null, or { file, rarity, duplicate, refund }.
+   */
+  function rollDrop(ctx) {
+    const r = ctx.rng || Math.random;
+    if (!(r() < (DROP_CHANCE[ctx.source] ?? 0))) return null;
+    let rarity = rarityFor(ctx.opponentLevel || 1, r);
+    const keysOf = (t) => [...(t.kind === "weapon" ? ["weapon:slot"] : []), ...t.effects.map((e) => E.familyOf(t.kind, e))];
+    let pool = BLUEPRINTS.filter((t) => keysOf(t).every((k) => ctx.unlocked.has(k)));
+    if (ctx.prefer) { const fav = pool.filter((t) => keysOf(t).includes(ctx.prefer)); if (fav.length) pool = fav; }
+    if (rarity !== "epic") pool = pool.filter((t) => t.kind !== "weapon").length ? pool.filter((t) => t.kind !== "weapon") : pool;
+    else if (pool.some((t) => t.kind === "weapon") && !ctx.prefer) pool = pool.filter((t) => t.kind === "weapon");
+    if (!pool.length) return null;
+    const t = pool[Math.floor(r() * pool.length)];
+    const fitLevel = Math.max(1, (ctx.level || 1) - RARITY[rarity].levelBack);
+    const v = E.fitSkill({ ...t, effects: t.effects.map((e) => ({ ...e })) }, fitLevel);
+    if (!v.skill || v.overBudget) return null;
+    const file = { ...v.skill, id: E.newId(r, "bp_"), from: "drop", rarity };
+    const duplicate = (ctx.owned || []).some((x) => x && x.name === file.name && x.kind === file.kind);
+    return { file, rarity, duplicate, refund: duplicate ? RARITY[rarity].refund : 0 };
+  }
+
   return {
+    codexPrice, BLUEPRINTS, DROP_CHANCE, RARITY, rollDrop,
     START, FREE_ROUNDS_PER_DAY, ROUND_COST, ARENA_REWARDS_PER_DAY, PRICES, LEDGER_KEEP,
     itemPrice, forgeCost, dayKey, newWallet, sanitizeWallet, balance, credit, spend, canAfford,
     gymQuote, payForGym, rivalReward, arenaReward, payArena,

@@ -67,6 +67,17 @@
     thorns:        { label: "Thorns",        params: { pct: [0.05, 0.4, 0.05] } },
     style_boost:   { label: "Style mastery", params: { style: STYLES, pct: [0.05, 0.5, 0.05] } },
   };
+  // Weapon effects (the weapon slot: always on, they change how your attacks land)
+  const WEAPON_EFFECTS = {
+    edge:          { label: "Edge",          params: { style: STYLES, pct: [0.05, 0.4, 0.05] } },
+    rider:         { label: "Rider",         params: { style: STYLES, status: ["burn", "poison"], chance: [0.1, 0.6, 0.05] } },
+    crit:          { label: "Critical",      params: { chance: [0.05, 0.3, 0.05] } },
+    lifesteal:     { label: "Lifesteal",     params: { pct: [0.05, 0.3, 0.05] } },
+    guard:         { label: "Guard",         params: { amount: [1, 6, 1] } },
+    evade:         { label: "Evade",         params: { pct: [0.02, 0.2, 0.01] } },
+  };
+  const KINDS = ["active", "passive", "weapon"];
+  const tableOf = (kind) => (kind === "passive" ? PASSIVE_EFFECTS : kind === "weapon" ? WEAPON_EFFECTS : EFFECTS);
   const ELEMENTS = ["none", "fire", "ice", "storm", "poison", "light", "shadow", "earth", "water", "tech", "spirit"];
 
   /** Power budget of one effect: roughly "damage-equivalent per use". */
@@ -103,17 +114,32 @@
       default: return 0;
     }
   }
+  // Weapon prices, calibrated like skill prices (equal-power weapons win about equally often).
+  const WPRICE = { edge: 6.8, rider: 3.15, crit: 8.55, lifesteal: 9.7, guard: 1.33, evade: 13.3 };
+  function weaponBudget(e) {
+    switch (e.type) {
+      case "edge": return e.pct * WPRICE.edge;
+      case "rider": return e.chance * WPRICE.rider;
+      case "crit": return e.chance * WPRICE.crit;
+      case "lifesteal": return e.pct * WPRICE.lifesteal;
+      case "guard": return e.amount * WPRICE.guard;
+      case "evade": return e.pct * WPRICE.evade;
+      default: return 0;
+    }
+  }
   /** The biggest skill a fighter of this level can forge. Grows with level. */
   function maxSkillBudget(level) { return round2(Math.min(12, 4.5 + 0.2 * (level - 1))); }
   function maxPassiveBudget(level) { return round2(Math.min(7, 2.5 + 0.1 * (level - 1))); }
+  function maxWeaponBudget(level) { return maxPassiveBudget(level); }
+  function capFor(kind, level) { return kind === "passive" ? maxPassiveBudget(level) : kind === "weapon" ? maxWeaponBudget(level) : maxSkillBudget(level); }
 
   /**
    * Price a skill: budget -> energy cost and cooldown. `cheaper` (0-2) trades energy for cooldown.
    * Players never set the price themselves.
    */
   function priceSkill(skill, cheaper = 0) {
-    if (skill.kind === "passive") {
-      const budget = round2(skill.effects.reduce((a, e) => a + passiveBudget(e), 0));
+    if (skill.kind === "passive" || skill.kind === "weapon") {
+      const budget = round2(skill.effects.reduce((a, e) => a + (skill.kind === "weapon" ? weaponBudget(e) : passiveBudget(e)), 0));
       return { budget, energy: 0, cooldown: 0, priority: 0 };
     }
     const totalPower = skill.effects.filter((e) => e.type === "damage").reduce((a, e) => a + e.power * (e.hits || 1), 0);
@@ -146,12 +172,19 @@
       case "resist": return `immune to ${e.status}`;
       case "thorns": return `reflects ${pct(e.pct)} of damage taken`;
       case "style_boost": return `+${pct(e.pct)} damage with ${STYLE_INFO[e.style].label} skills`;
+      case "edge": return `+${pct(e.pct)} damage with ${STYLE_INFO[e.style].label} skills`;
+      case "rider": return `${STYLE_INFO[e.style].label} skills have a ${pct(e.chance)} chance to ${e.status}`;
+      case "crit": return `${pct(e.chance)} chance of a critical hit (×1.5)`;
+      case "lifesteal": return `heals you for ${pct(e.pct)} of the damage you deal`;
+      case "guard": return `blocks ${e.amount} damage of the first hit each turn`;
+      case "evade": return `+${pct(e.pct)} chance to dodge attacks (dodging is capped at ${Math.round(STAT_PCT.dodgeCap * 100)}%)`;
       default: return e.type;
     }
   }
   function describeSkill(s) {
     const effects = s.effects.map(describeEffect).join(", ");
     if (s.kind === "passive") return `Passive: ${effects}.`;
+    if (s.kind === "weapon") return `Weapon: ${effects}.`;
     const cost = `${s.energy} energy${s.cooldown ? `, cooldown ${s.cooldown}` : ""}${s.priority ? ", acts first" : ""}`;
     return `${STYLE_INFO[s.style].label}. ${effects[0].toUpperCase() + effects.slice(1)}. (${cost})`;
   }
@@ -193,14 +226,14 @@
   function validateSkill(raw, opts = {}) {
     const errors = [];
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { skill: null, errors: ["Not a skill file."] };
-    const kind = raw.kind === "passive" ? "passive" : "active";
-    const table = kind === "passive" ? PASSIVE_EFFECTS : EFFECTS;
+    const kind = KINDS.includes(raw.kind) ? raw.kind : "active";
+    const table = tableOf(kind);
     const rawEffects = Array.isArray(raw.effects) ? raw.effects.slice(0, 6) : [];
     const effects = [];
     for (const r of rawEffects) {
       const e = cleanEffect(r, table);
       if (!e) { errors.push(`Unknown or invalid effect: ${String(r && r.type).slice(0, 20)}`); continue; }
-      if (effects.some((x) => x.type === e.type)) { errors.push(`Only one ${EFFECTS[e.type]?.label || e.type} per skill.`); continue; }
+      if (effects.some((x) => x.type === e.type)) { errors.push(`Only one ${table[e.type]?.label || e.type} per skill.`); continue; }
       effects.push(e);
     }
     if (effects.length > 3) { effects.length = 3; errors.push("A skill can have at most 3 effects."); }
@@ -213,7 +246,7 @@
     const id = typeof raw.id === "string" && ID_RE.test(raw.id) && !BASIC[raw.id] ? raw.id : "sk_" + hash(JSON.stringify([kind, style, effects, raw.name])).toString(36);
     const skill = { id, name: cleanName(raw.name || "NEW SKILL"), kind, style, element, effects, cheaper: Math.round(num(raw.cheaper, 0, 2, 0)) };
     Object.assign(skill, priceSkill(skill, skill.cheaper));
-    const cap = opts.level ? (kind === "passive" ? maxPassiveBudget(opts.level) : maxSkillBudget(opts.level)) : Infinity;
+    const cap = opts.level ? capFor(kind, opts.level) : Infinity;
     if (skill.budget > cap) errors.push(`Too powerful for level ${opts.level}: power ${skill.budget}, limit ${cap}.`);
     return { skill, errors, overBudget: skill.budget > cap };
   }
@@ -222,8 +255,8 @@
   function fitSkill(raw, level) {
     const first = validateSkill(raw, { level });
     if (!first.skill || !first.overBudget) return first;
-    const cap = first.skill.kind === "passive" ? maxPassiveBudget(level) : maxSkillBudget(level);
-    const table = first.skill.kind === "passive" ? PASSIVE_EFFECTS : EFFECTS;
+    const cap = capFor(first.skill.kind, level);
+    const table = tableOf(first.skill.kind);
     const budgetOf = (sk) => validateSkill(sk, { level }).skill.budget;
     // 1. Shrink whole-number knobs one step at a time (fewer hits, shorter effects, rarer regen ticks)
     //    until scaling the rest can fit.
@@ -255,7 +288,7 @@
   }
   /** Multiply a skill's continuous effect numbers by k (validation clamps them to their ranges). */
   function scaleCont(skill, k) {
-    const table = skill.kind === "passive" ? PASSIVE_EFFECTS : EFFECTS;
+    const table = tableOf(skill.kind);
     return { ...skill, effects: skill.effects.map((e) => {
       const out = { ...e };
       for (const [key, spec] of Object.entries(table[e.type].params)) {
@@ -322,6 +355,124 @@
     { id: "ps_wind", name: "SECOND WIND", kind: "passive", style: "guard", element: "spirit", effects: [{ type: "regen", heal: 2, every: 3 }] },
     { id: "ps_battery", name: "BATTERY", kind: "passive", style: "mind", element: "tech", effects: [{ type: "energy_flow", amount: 1, every: 3 }] },
   ].map((p) => validateSkill(p).skill);
+
+  // =====================================================================================
+  // The rulebook: what skill files and loadouts may and may not do
+  // =====================================================================================
+  const CLAUSES = { stunMax: 1, healCap: 0.5, oneHitCap: 0.4 };
+  const SPECIAL = (sk) => [...new Set(sk.effects.map((e) => e.type).filter((t) => t !== "damage"))];
+  /** Loadout clauses (like Smogon's): returns the broken rules in plain words, [] when legal. */
+  function validateLoadout(f) {
+    const errors = [];
+    const skills = (f.moves || []).map((m) => skillOf(f, m)).filter(Boolean);
+    const stunners = skills.filter((sk) => sk.effects.some((e) => e.type === "stun"));
+    if (stunners.length > CLAUSES.stunMax) errors.push(`Stun clause: only one skill that can stun (${stunners.map((x) => x.name).join(" and ")}).`);
+    const seen = {};
+    for (const sk of skills) for (const t of SPECIAL(sk)) (seen[t] = seen[t] || []).push(sk.name);
+    for (const [t, names] of Object.entries(seen)) {
+      if (names.length > 1 && t !== "stun") errors.push(`No duplicates: ${names.join(" and ")} both use ${(EFFECTS[t] || { label: t }).label.toLowerCase()}.`);
+    }
+    if (f.weapon && f.weapon.kind !== "weapon") errors.push("The weapon slot only takes a weapon file.");
+    if (f.passive && f.passive.kind !== "passive") errors.push("The passive slot only takes a passive file.");
+    return errors;
+  }
+
+  // Unlocks: effect families. Starters are open to everyone; the rest come from rival badges
+  // (the first win against each rival) or can be bought early in the Codex.
+  const FAMILIES = {
+    "active:damage": null, "active:burn": null, "active:shield": null, "active:heal": null,
+    "active:weaken": "velvet", "active:energy_drain": "velvet",
+    "active:focus": "grid", "active:energy_gain": "grid",
+    "active:regen": "bastion", "active:cleanse": "bastion",
+    "active:drain": "mimic", "active:stun": "oracle", "active:poison": "kade",
+    "passive:regen": null, "passive:start_shield": null,
+    "passive:style_boost": "velvet", "passive:energy_flow": "grid", "passive:resist": "bastion", "passive:thorns": "mimic",
+    // weapons: the slot is Sal's badge; edge and burn riders come with the slot (every weapon needs the slot first)
+    "weapon:slot": "sal", "weapon:edge": null, "weapon:rider:burn": null,
+    "weapon:crit": "grid", "weapon:guard": "bastion", "weapon:lifesteal": "mimic", "weapon:evade": "oracle", "weapon:rider:poison": "kade",
+  };
+  const familyOf = (kind, e) => (kind === "weapon" && e.type === "rider" ? `weapon:rider:${e.status}` : `${kind}:${e.type}`);
+  /** Every family this player may forge with: starters + badges from beaten rivals + Codex purchases. */
+  function unlockedFamilies(progress) {
+    const beaten = new Set((progress && progress.beaten) || []), bought = new Set((progress && progress.codex) || []);
+    return new Set(Object.entries(FAMILIES).filter(([k, rv]) => rv === null || beaten.has(rv) || bought.has(k)).map(([k]) => k));
+  }
+  function familyLabel(key) {
+    const [kind, type, sub] = key.split(":");
+    if (key === "weapon:slot") return "Weapon slot";
+    if (type === "rider") return `Weapon ${sub} rider`;
+    const t = tableOf(kind)[type];
+    return `${kind === "active" ? "" : kind === "passive" ? "Passive " : "Weapon "}${t ? t.label.toLowerCase() : type}`.replace(/^./, (c) => c.toUpperCase());
+  }
+  /** Families a skill file needs that aren't unlocked yet, with how to get them. */
+  function lockedIn(skill, unlocked) {
+    const out = [];
+    const need = skill.effects.map((e) => familyOf(skill.kind, e));
+    if (skill.kind === "weapon") need.unshift("weapon:slot");
+    for (const k of new Set(need)) {
+      if (unlocked.has(k) || !(k in FAMILIES)) continue;
+      const rv = RIVALS.find((x) => x.id === FAMILIES[k]);
+      out.push({ key: k, label: familyLabel(k), rival: rv ? rv.name : null, rivalId: rv ? rv.id : null });
+    }
+    return out;
+  }
+  // Practice: new files are "in training" until used enough in practice (like FF IX's AP).
+  function practiceNeeded(file) {
+    if (!file || file.basic) return 0;
+    if (STARTER_PASSIVES.some((p) => p.id === file.id)) return 0;
+    const b = Number(file.budget) || 0;
+    return file.kind === "active" ? Math.round(10 + 8 * b) : Math.round(3 + 2 * b);
+  }
+  function practiceCount(f, file) { return Math.max(0, Math.round((f.uses && f.uses[file.id]) || 0)); }
+  function isProven(f, file) {
+    if (!file) return true;
+    const need = practiceNeeded(file);
+    return need === 0 || (f.proven || []).includes(file.id) || practiceCount(f, file) >= need;
+  }
+  /** Is this fighter allowed into rival and arena battles? Lists what's still in training. */
+  function readiness(f) {
+    const files = [...(f.moves || []).map((m) => skillOf(f, m)).filter((s) => s && !s.basic), f.passive, f.weapon].filter(Boolean);
+    const pending = files.filter((x) => !isProven(f, x)).map((x) => ({ id: x.id, name: x.name, kind: x.kind, have: practiceCount(f, x), need: practiceNeeded(x) }));
+    const clauses = validateLoadout(f);
+    return { ready: !pending.length && !clauses.length, pending, clauses };
+  }
+  /** Record files that have crossed their practice requirement (proven for good). */
+  function markProven(f) {
+    const files = [...(f.moves || []).map((m) => skillOf(f, m)).filter((s) => s && !s.basic), f.passive, f.weapon].filter(Boolean);
+    f.proven = Array.isArray(f.proven) ? f.proven : [];
+    for (const x of files) if (!f.proven.includes(x.id) && practiceCount(f, x) >= practiceNeeded(x)) f.proven.push(x.id);
+    f.proven = f.proven.slice(-200);
+    return f;
+  }
+  /** One practice battle with this passive and weapon equipped. */
+  function countGear(f, times = 1) {
+    f.uses = f.uses || {};
+    for (const x of [f.passive, f.weapon]) if (x && practiceNeeded(x) > 0) f.uses[x.id] = (f.uses[x.id] || 0) + times;
+  }
+  const RULEBOOK = [
+    { title: "What a skill file can contain", items: [
+      "Only the listed effects, at most 3 per file, each type once, with numbers inside each effect's range.",
+      "Its power must fit your level's limit: skills, passives and weapons each have one, and it grows as you level up.",
+      "The game sets energy cost and cooldown from the power. You can't set the price yourself.",
+    ] },
+    { title: "Unlocking", items: [
+      "Everyone starts with damage, burn, shield and heal skills, plus regen and starting-shield passives.",
+      "Each rival you beat for the first time earns a badge that unlocks new effects; Sal's badge opens the weapon slot.",
+      "You can unlock an effect early in the Codex for Cycles. Files you already own can always be equipped.",
+      "Real wins can drop ready-made blueprints into your library; duplicates turn into Cycles.",
+    ] },
+    { title: "Practice before battle", items: [
+      "A new skill, passive or weapon is in training until you've practiced with it: skills need uses in the gym (10 + 8 × power), passives and weapons need practice battles (3 + 2 × power).",
+      "Sparring by hand counts double. A drill makes your fighter use the skill whenever it can.",
+      "In-training files work in the gym and sparring, but not against rivals or in the arena. Once proven, a file stays battle-ready.",
+    ] },
+    { title: "Clauses", items: [
+      `Stun clause: at most ${CLAUSES.stunMax} skill that can stun in a loadout.`,
+      "No duplicates: no two skills share a special effect (burn, shield, drain, weaken and so on). Plain attacks are fine.",
+      `Heal cap: a fighter heals at most ${Math.round(CLAUSES.healCap * 100)}% of its max HP per battle, from all sources together.`,
+      `One-hit cap: a single action deals at most ${Math.round(CLAUSES.oneHitCap * 100)}% of the target's max HP (burn and poison are separate).`,
+    ] },
+  ];
 
   // =====================================================================================
   // Randomness, progression, stats
@@ -422,7 +573,7 @@
   const DEFAULT_DESIGN = { hue: 200, accent: 40, body: "round", size: 0.6, spikes: 1, armor: false, eyes: "round", pattern: "plain" };
   const PERSONA_MAX = 300, PLAYBOOK_MAX = 1200, MAX_RULES = 4;
 
-  function createFighter({ name, moves, personality, design, id, custom, passive, item } = {}, r = Math.random) {
+  function createFighter({ name, moves, personality, design, id, custom, passive, item, weapon } = {}, r = Math.random) {
     custom = custom || {};
     moves = (moves || ["fight", "talk", "strategize", "shield"]).slice(0, 4);
     const f0 = { custom };
@@ -430,11 +581,11 @@
     personality = Object.fromEntries(TRAITS.map((t) => [t, clamp(personality?.[t] ?? 0.5, 0, 1)]));
     const f = {
       id: id || newId(r), name: String(name || "ROOKIE").slice(0, 16), design: { ...DEFAULT_DESIGN, ...(design || {}) },
-      personality, moves, custom: pickCustom(custom, moves), passive: passive || null, item: item || null,
-      stats: { power: 0, vitality: 0, speed: 0 }, rules: [],
+      personality, moves, custom: pickCustom(custom, moves), passive: passive || null, item: item || null, weapon: weapon || null,
+      stats: { power: 0, vitality: 0, speed: 0 }, rules: [], proven: [],
       level: 1, xp: 0, record: { w: 0, l: 0, d: 0 }, battleRecord: { w: 0, l: 0, d: 0 },
       uses: Object.fromEntries(moves.map((m) => [m, 0])), history: [], sessions: 0, createdAt: Date.now(),
-      persona: "", playbook: "", rev: 0, version: 3,
+      persona: "", playbook: "", rev: 0, version: 4,
     };
     f.brain = newBrain(f);
     return f;
@@ -445,13 +596,14 @@
     return out;
   }
   /** Change the loadout or looks; skills kept in the loadout keep their training. */
-  function redesign(f, { name, moves, personality, design, custom, passive, item }) {
+  function redesign(f, { name, moves, personality, design, custom, passive, item, weapon }) {
     const g = clone(f);
     if (name) g.name = String(name).slice(0, 16);
     if (design) g.design = { ...g.design, ...design };
     if (personality) g.personality = Object.fromEntries(TRAITS.map((t) => [t, clamp(personality[t] ?? g.personality[t], 0, 1)]));
     if (passive !== undefined) g.passive = passive;
     if (item !== undefined) g.item = item;
+    if (weapon !== undefined) g.weapon = weapon;
     const pool = { ...(f.custom || {}), ...(custom || {}) };
     if (moves && moves.join() !== f.moves.join()) {
       const probe = { custom: pool };
@@ -465,7 +617,9 @@
       for (let c = 0; c < N_CTX; c++) fresh.W[c][ITEM_SLOT] = f.brain.W[c][ITEM_SLOT];
       g.brain = fresh;
       g.moves = moves.slice();
-      g.uses = Object.fromEntries(moves.map((m) => [m, f.uses[m] || 0]));
+      // practice counts stay with the fighter (by file id), so swapping a skill out and back keeps its progress
+      g.uses = { ...(f.uses || {}) };
+      for (const m of moves) g.uses[m] = g.uses[m] || 0;
       g.rules = (g.rules || []).filter((rl) => rl.do.item || g.moves.includes(rl.do.skill));
     } else if (custom) {
       g.custom = pickCustom(pool, g.moves);
@@ -502,8 +656,14 @@
     g.stats = statsOf(g);
     if (g.stats.power + g.stats.vitality + g.stats.speed > statPointsFor(g.level || 1)) g.stats = { power: 0, vitality: 0, speed: 0 };
     g.rules = sanitizeRules(g.rules, g.moves);
-    if (g.passive) { const v = validateSkill(g.passive); g.passive = v.skill && v.skill.kind === "passive" ? v.skill : null; } else g.passive = null;
+    if (g.passive) { const v = validateSkill(g.passive); g.passive = v.skill && v.skill.kind === "passive" ? { ...v.skill, id: g.passive.id || v.skill.id } : null; } else g.passive = null;
+    if (g.weapon) { const v = validateSkill(g.weapon); g.weapon = v.skill && v.skill.kind === "weapon" ? { ...v.skill, id: g.weapon.id || v.skill.id } : null; } else g.weapon = null;
     g.item = ITEMS[g.item] ? g.item : null;
+    // rules v4: files already equipped before practice existed are grandfathered as battle-ready
+    if (!Array.isArray(g.proven)) {
+      g.proven = [...g.moves.filter((m) => !BASIC[m]), ...(g.passive ? [g.passive.id] : []), ...(g.weapon ? [g.weapon.id] : [])];
+    }
+    g.proven = g.proven.filter((x) => typeof x === "string" && ID_RE.test(x)).slice(-200);
     // instincts: older fighters had 15 contexts x 4 moves; v3 has 30 x 5
     const b = g.brain;
     const okV3 = b && Array.isArray(b.W) && b.W.length === N_CTX && b.W.every((row) => Array.isArray(row) && row.length === N_ACT);
@@ -517,7 +677,7 @@
       }
       g.brain = fresh;
     }
-    g.version = 3;
+    g.version = 4;
     return g;
   }
 
@@ -571,6 +731,7 @@
       last: null, styleCounts: { aggro: 0, social: 0, mind: 0, guard: 0 }, scripted: !f.brain, learn: false, imitate: false, speed: st.speed,
       scale: levelBonus(f.level || 1),                                          // heals grow with level
       punch: levelBonus(f.level || 1) * (1 + STAT_PCT.power * st.power),       // shields, burn and poison grow like damage
+      healLeft: max * CLAUSES.healCap, guardTurn: 0,                            // heal cap; weapon guard once per turn
     };
     for (const e of passiveEffects(f)) if (e.type === "start_shield") s.shield = { amount: round2(e.amount * s.punch), turns: 99 };
     return s;
@@ -583,6 +744,13 @@
     return { side, turns: [], turn: 1, over: false };
   }
   function resists(s, status) { return passiveEffects(s.f).some((e) => e.type === "resist" && e.status === status); }
+  function weaponEffects(f) { return f.weapon && f.weapon.effects ? f.weapon.effects : []; }
+  /** Every heal goes through here: capped by max HP and by the battle's heal cap. Returns HP healed. */
+  function healSide(s, amount) {
+    const h = round2(Math.max(0, Math.min(amount, s.healLeft, s.max - s.hp)));
+    s.hp = round2(s.hp + h); s.healLeft = round2(s.healLeft - h);
+    return h;
+  }
   /** Which of the 5 actions (4 skills + item) a side can take right now. */
   function legalMask(state, i) {
     const s = state.side[i];
@@ -657,7 +825,12 @@
     const a = state.side[att], d = state.side[def];
     let total = 0;
     const tm = out.typeMult;
-    const boost = passiveEffects(a.f).filter((e) => e.type === "style_boost" && e.style === sk.style).reduce((x, e) => x + e.pct, 0);
+    const wa = weaponEffects(a.f), wd = weaponEffects(d.f);
+    const boost = passiveEffects(a.f).filter((e) => e.type === "style_boost" && e.style === sk.style).reduce((x, e) => x + e.pct, 0)
+      + wa.filter((e) => e.type === "edge" && e.style === sk.style).reduce((x, e) => x + e.pct, 0);
+    const crit = wa.filter((e) => e.type === "crit").reduce((x, e) => x + e.chance, 0);
+    const guard = wd.filter((e) => e.type === "guard").reduce((x, e) => x + e.amount, 0);
+    let budget = round2(d.max * CLAUSES.oneHitCap);   // one-hit cap: this action's direct damage
     const focus = a.focus || 1;
     a.focus = 0;
     for (let h = 0; h < hits; h++) {
@@ -665,7 +838,9 @@
         * (1 + STAT_PCT.power * statsOf(a.f).power) * (1 + boost) * focus * (0.9 + 0.2 * r());
       if (a.weaken) dmg *= 1 - a.weaken.pct;
       if (a.smoke > 0) dmg *= 0.5;
+      if (crit > 0 && r() < crit) { dmg *= 1.5; out.crit = true; }
       dmg = round2(dmg);
+      if (guard > 0 && d.guardTurn !== state.turn) { const g = Math.min(dmg, round2(guard * d.punch)); d.guardTurn = state.turn; dmg = round2(dmg - g); out.guarded = round2((out.guarded || 0) + g); }
       if (d.shield && d.shield.amount > 0) {
         const absorbed = Math.min(d.shield.amount, dmg);
         d.shield.amount = round2(d.shield.amount - absorbed);
@@ -673,6 +848,8 @@
         dmg = round2(dmg - absorbed);
         if (d.shield.amount <= 0) d.shield = null;
       }
+      if (dmg > budget) { dmg = budget; out.capped = true; }
+      budget = round2(budget - dmg);
       d.hp = Math.max(0, round2(d.hp - dmg));
       total = round2(total + dmg);
       const thorns = passiveEffects(d.f).filter((e) => e.type === "thorns").reduce((x, e) => x + e.pct, 0);
@@ -695,7 +872,7 @@
       const it = ITEMS[me.f.item];
       me.itemLeft = false;
       out.item = it.id;
-      if (it.id === "potion") { const before = me.hp; me.hp = Math.min(me.max, round2(me.hp + it.heal * me.max)); out.healed = round2(me.hp - before); }
+      if (it.id === "potion") out.healed = healSide(me, it.heal * me.max);
       else if (it.id === "ether") me.energy = Math.min(ENERGY.max, me.energy + 4);
       else if (it.id === "antidote") { me.burn = me.poison = me.weaken = null; me.statusBlock = 1; }
       else if (it.id === "smoke") them.smoke = 2;
@@ -706,22 +883,34 @@
     me.energy -= sk.energy;
     if (sk.cooldown) me.cooldowns[sk.id] = sk.cooldown + 1;   // +1: counted down at the end of this turn
     const dmgE = sk.effects.find((e) => e.type === "damage");
-    const dodge = Math.min(STAT_PCT.dodgeCap, STAT_PCT.speed * (them.speed || 0));
+    const evade = weaponEffects(them.f).filter((e) => e.type === "evade").reduce((x, e) => x + e.pct, 0);
+    const dodge = Math.min(STAT_PCT.dodgeCap, STAT_PCT.speed * (them.speed || 0) + evade);
     const hostile = sk.effects.some((e) => HOSTILE_EFFECTS.has(e.type));
     if (hostile && dodge > 0 && r() < dodge) { out.dodged = true; out.notes.push(`${them.f.name} dodges`); }
     let dealt = 0;
     if (dmgE && !out.dodged) dealt = applyDamage(state, i, 1 - i, sk, dmgE.power, dmgE.hits || 1, mult, r, out);
     out.points = dealt;
+    if (dealt > 0) {
+      const ws = weaponEffects(me.f);
+      const steal = ws.filter((e) => e.type === "lifesteal").reduce((x, e) => x + e.pct, 0);
+      if (steal > 0) { const h = healSide(me, dealt * steal); if (h > 0) out.healed = round2((out.healed || 0) + h); }
+      for (const e of ws) {
+        if (e.type !== "rider" || e.style !== sk.style || !tryStatus(state, 1 - i, e.status, e.chance, r, out)) continue;
+        if (e.status === "burn") them.burn = { damage: Math.max(round2(2 * me.punch), them.burn?.damage || 0), turns: Math.max(2, them.burn?.turns || 0) };
+        else them.poison = { stacks: Math.min(5, (them.poison?.stacks || 0) + 1), turns: 4, per: Math.max(me.punch, them.poison?.per || 1) };
+        out.applied.push(`${e.status} (weapon)`);
+      }
+    }
     for (const e of sk.effects) {
       if (out.dodged && HOSTILE_EFFECTS.has(e.type)) continue;   // a dodged attack lands nothing on them
       switch (e.type) {
-        case "drain": if (dealt > 0) { const h = round2(dealt * e.pct); me.hp = Math.min(me.max, round2(me.hp + h)); out.healed = round2((out.healed || 0) + h); } break;
+        case "drain": if (dealt > 0) { const h = healSide(me, dealt * e.pct); out.healed = round2((out.healed || 0) + h); } break;
         case "burn": if (tryStatus(state, 1 - i, "burn", e.chance, r, out)) { them.burn = { damage: Math.max(round2(e.damage * me.punch), them.burn?.damage || 0), turns: Math.max(e.turns, them.burn?.turns || 0) }; out.applied.push("burn"); } break;
         case "poison": if (tryStatus(state, 1 - i, "poison", e.chance, r, out)) { them.poison = { stacks: Math.min(5, (them.poison?.stacks || 0) + e.stacks), turns: 4, per: Math.max(me.punch, them.poison?.per || 1) }; out.applied.push("poison"); } break;
         case "stun": if (tryStatus(state, 1 - i, "stun", e.chance, r, out)) { them.stunned = true; out.applied.push("stun"); } break;
         case "weaken": if (tryStatus(state, 1 - i, "weaken", 1, r, out)) { them.weaken = { pct: Math.max(e.pct, them.weaken?.pct || 0), turns: Math.max(e.turns, them.weaken?.turns || 0) }; out.applied.push("weaken"); } break;
         case "shield": me.shield = { amount: Math.min(round2(20 * me.punch), round2((me.shield?.amount || 0) + e.amount * me.punch)), turns: Math.max(e.turns, me.shield?.turns || 0) }; out.applied.push("shield"); break;
-        case "heal": { const before = me.hp; me.hp = Math.min(me.max, round2(me.hp + e.amount * me.scale)); out.healed = round2((out.healed || 0) + me.hp - before); break; }
+        case "heal": { const h = healSide(me, e.amount * me.scale); out.healed = round2((out.healed || 0) + h); break; }
         case "regen": if (me.regen.length < 2) { me.regen.push({ heal: round2(e.heal * me.scale), every: e.every, turns: e.turns, age: 0 }); out.applied.push("regen"); } break;
         case "focus": me.focus = Math.max(me.focus || 1, e.mult); out.applied.push("focus"); break;
         case "cleanse": me.burn = me.poison = me.weaken = null; out.applied.push("cleanse"); break;
@@ -740,7 +929,7 @@
       for (const rg of s.regen) { rg.age++; if (rg.age % rg.every === 0) heals.push(rg.heal); }
       s.regen = s.regen.filter((rg) => rg.age < rg.turns);
       for (const e of passiveEffects(s.f)) if (e.type === "regen" && state.turn % e.every === 0) heals.push(round2(e.heal * s.scale));
-      for (const h of heals) if (s.hp > 0) { const b = s.hp; s.hp = Math.min(s.max, round2(s.hp + h)); if (s.hp > b) events.push({ who: s.f.name, kind: "regen", amount: round2(s.hp - b) }); }
+      for (const h of heals) if (s.hp > 0) { const got = healSide(s, h); if (got > 0) events.push({ who: s.f.name, kind: "regen", amount: got }); }
       if (s.weaken && --s.weaken.turns <= 0) s.weaken = null;
       if (s.shield && --s.shield.turns <= 0) s.shield = null;
       if (s.smoke > 0) s.smoke--;
@@ -813,6 +1002,7 @@
         effect: o.typeMult > 1 ? "super" : o.typeMult < 1 ? "resisted" : "neutral",
         applied: o.applied, notes: o.notes, healed: o.healed || 0, absorbed: o.absorbed || 0, reflected: o.reflected || 0,
         stunned: !!o.stunned, fizzled: !!o.fizzled, skipped: !!o.skipped, dodged: !!o.dodged, item: o.item || null,
+        crit: !!o.crit, capped: !!o.capped, guarded: o.guarded || 0,
         content: sk ? sk.say.replace("{me}", f.name).replace("{them}", side[1 - i].f.name) : "",
         ...(p.source ? { source: p.source } : {}), ...(p.line ? { line: p.line } : {}), ...(p.rule ? { rule: p.rule } : {}),
       };
@@ -820,7 +1010,7 @@
     const snapshot = side.map((s) => ({
       hp: s.hp, max: s.max, energy: s.energy, shield: s.shield ? s.shield.amount : 0,
       status: [s.burn && "burn", s.poison && `poison×${s.poison.stacks}`, s.weaken && "weaken", s.stunned && "stunned", s.regen.length && "regen", s.focus > 1 && "focus"].filter(Boolean),
-      cooldowns: { ...s.cooldowns }, itemLeft: s.itemLeft,
+      cooldowns: { ...s.cooldowns }, itemLeft: s.itemLeft, healLeft: s.healLeft,
     }));
     const rec = { turn, phase: PHASES[ph].id, multiplier: mult, actions, events, hp: side.map((s) => s.hp), max: side.map((s) => s.max), state: snapshot };
     state.turns.push(rec);
@@ -846,7 +1036,15 @@
     const r = opts.rng || Math.random;
     const st = newBattle(A, B, opts);
     while (!st.over) {
-      const picks = [0, 1].map((i) => { const p = instinctChoice(st, i, r); if (st.side[i].learn) p.mask = legalMask(st, i); return p; });
+      const picks = [0, 1].map((i) => {
+        let p = instinctChoice(st, i, r);
+        if (i === 0 && opts.drill && isLegal(st, 0, { kind: "skill", skill: opts.drill })) {
+          const idx = st.side[0].f.moves.indexOf(opts.drill);   // drill: use the skill whenever it can
+          p = { kind: "skill", skill: opts.drill, idx, ctx: ctxFor(st, 0), source: "drill" };
+        }
+        if (st.side[i].learn) p.mask = legalMask(st, i);
+        return p;
+      });
       resolveTurn(st, picks, r);
     }
     return finishBattle(st);
@@ -943,7 +1141,8 @@
     let last = null;
     for (let i = 0; i < reps; i++) {
       const foe = partnerFighter(partnerId, f);
-      last = fight(f, foe, { rng: r, learnA: true });
+      last = fight(f, foe, { rng: r, learnA: true, drill: opts.drill && f.moves.includes(opts.drill) ? opts.drill : null });
+      countGear(f);
       res[last.result]++;
       f.record[last.result === "win" ? "w" : last.result === "loss" ? "l" : "d"]++;
       f.xp += xpForMatch(last.result, f.level, foe.level || 1);
@@ -951,6 +1150,7 @@
       curve.push(last.result === "win" ? 1 : last.result === "draw" ? 0.5 : 0);
     }
     f.brain = compactBrain(f.brain);
+    markProven(f);
     f.sessions = (f.sessions || 0) + 1;
     f.history = [...(f.history || []), { at: Date.now(), partner: partnerId, reps, win: res.win, loss: res.loss, draw: res.draw, level: f.level }].slice(-60);
     return {
@@ -980,6 +1180,7 @@
       if (!mask[slot]) throw new Error("That action isn't available right now.");
       imitate(me.f.brain, ctx, slot, mask);
       mine = { ...actionOf(me.f, slot), idx: slot, ctx, mask, source: "you" };
+      if (mine.kind === "skill") me.f.uses[mine.skill] = (me.f.uses[mine.skill] || 0) + 1;   // hand practice counts double
     }
     const theirs = instinctChoice(st, 1, r);
     return resolveTurn(st, [mine, theirs], r);
@@ -990,6 +1191,8 @@
     const trained = spar.state.side[0].f;
     f.brain = compactBrain(trained.brain);
     f.uses = { ...f.uses, ...trained.uses };
+    countGear(f, 2);
+    markProven(f);
     f.record[m.result === "win" ? "w" : m.result === "loss" ? "l" : "d"]++;
     const xp = xpForMatch(m.result, f.level, spar.foe.level || 1) * 2;   // hands-on sparring is worth double
     f.xp += xp; f.level = levelForXp(f.xp);
@@ -1028,7 +1231,7 @@
   const RIVAL_SKILLS = {
     haymaker: { name: "HAYMAKER", style: "aggro", element: "earth", effects: [{ type: "damage", power: 4.6 }] },
     charm:    { name: "CHARM", style: "social", element: "light", effects: [{ type: "damage", power: 1.5 }, { type: "weaken", pct: 0.4, turns: 2 }] },
-    overclock:{ name: "OVERCLOCK", style: "mind", element: "tech", effects: [{ type: "energy_gain", amount: 3 }, { type: "focus", mult: 1.5 }] },
+    overclock:{ name: "OVERCLOCK", style: "mind", element: "tech", effects: [{ type: "energy_gain", amount: 3 }, { type: "damage", power: 2.4 }] },
     fortress: { name: "FORTRESS", style: "guard", element: "earth", effects: [{ type: "shield", amount: 9, turns: 2 }, { type: "heal", amount: 6 }] },
     prophecy: { name: "PROPHECY", style: "mind", element: "spirit", effects: [{ type: "damage", power: 2 }, { type: "stun", chance: 0.45 }] },
     inferno:  { name: "INFERNO", style: "aggro", element: "fire", effects: [{ type: "damage", power: 4 }, { type: "burn", chance: 0.6, damage: 3, turns: 3 }] },
@@ -1059,7 +1262,7 @@
       design: { hue: 170, accent: 280, body: "tall", size: 0.6, spikes: 1, armor: false, eyes: "visor", pattern: "stripes" },
       persona: "Cold analyst. Treats every fight as a puzzle. Builds energy, then strikes with a focused COMPILE.",
       playbook: "- OVERCLOCK, then COMPILE for a focused hit.\n- DISSECT to starve big spenders of energy.\n- Never repeat the same move three times." },
-    { id: "bastion", name: "BASTION", level: 15, train: 400, moves: ["shield", "observe", "fortress", "fight"], passive: "thick", item: "potion",
+    { id: "bastion", name: "BASTION", level: 15, train: 400, moves: ["analyze", "observe", "fortress", "fight"], passive: "thick", item: "potion",
       rules: [{ when: { kind: "my_hp_below", value: 40 }, do: { skill: "fortress" } }],
       personality: { aggression: 0.4, caution: 0.95, creativity: 0.3, loyalty: 0.5 },
       design: { hue: 95, accent: 200, body: "wide", size: 0.8, spikes: 0, armor: true, eyes: "visor", pattern: "plain" },
@@ -1107,7 +1310,7 @@
   // =====================================================================================
   // Arena: sharing fighters between players (everything read is untrusted and re-validated)
   // =====================================================================================
-  const PUBLIC_FIELDS = ["id", "name", "design", "personality", "moves", "custom", "passive", "item", "rules", "stats", "level", "uses", "brain", "persona", "playbook", "battleRecord"];
+  const PUBLIC_FIELDS = ["id", "name", "design", "personality", "moves", "custom", "passive", "weapon", "item", "rules", "stats", "level", "uses", "proven", "brain", "persona", "playbook", "battleRecord"];
   function toPublic(f) {
     const o = {};
     for (const k of PUBLIC_FIELDS) o[k] = clone(f[k] ?? null);
@@ -1147,16 +1350,19 @@
       eyes: ONE_OF(d.eyes, ["round", "angry", "visor"], "round"), pattern: ONE_OF(d.pattern, ["plain", "spots", "stripes"], "plain"),
     };
     const usesIn = o.uses && typeof o.uses === "object" ? o.uses : {};
-    const uses = Object.fromEntries(moves.map((m) => [m, Math.round(num(usesIn[m], 0, 1e6, 0))]));
-    let passive = null;
-    if (o.passive) { const v = validateSkill(o.passive, { level }); if (v.skill && v.skill.kind === "passive" && !v.overBudget) passive = v.skill; }
+    let passive = null, weapon = null;
+    if (o.passive) { const v = validateSkill(o.passive, { level }); if (v.skill && v.skill.kind === "passive" && !v.overBudget) passive = { ...v.skill, id: ID_RE.test(String(o.passive.id || "")) ? o.passive.id : v.skill.id }; }
+    if (o.weapon) { const v = validateSkill(o.weapon, { level }); if (v.skill && v.skill.kind === "weapon" && !v.overBudget) weapon = { ...v.skill, id: ID_RE.test(String(o.weapon.id || "")) ? o.weapon.id : v.skill.id }; }
+    const ids = [...moves, ...(passive ? [passive.id] : []), ...(weapon ? [weapon.id] : [])];
+    const uses = Object.fromEntries(ids.map((m) => [m, Math.round(num(usesIn[m], 0, 1e6, 0))]));
+    const proven = Array.isArray(o.proven) ? o.proven.filter((x) => typeof x === "string" && ids.includes(x)) : [];
     const st = o.stats && typeof o.stats === "object" ? o.stats : {};
     let stats = { power: Math.round(num(st.power, 0, 49, 0)), vitality: Math.round(num(st.vitality, 0, 49, 0)), speed: Math.round(num(st.speed, 0, 49, 0)) };
     if (stats.power + stats.vitality + stats.speed > statPointsFor(level)) stats = { power: 0, vitality: 0, speed: 0 };
     const rec = o.battleRecord && typeof o.battleRecord === "object" ? o.battleRecord : {};
     const f = {
-      id: o.id, owner: typeof owner === "string" ? owner : null, name: cleanName(o.name), design, personality, moves, custom, passive,
-      item: ITEMS[o.item] ? o.item : null, rules: sanitizeRules(o.rules, moves), stats, uses, level, xp: xpForLevel(level),
+      id: o.id, owner: typeof owner === "string" ? owner : null, name: cleanName(o.name), design, personality, moves, custom, passive, weapon,
+      item: ITEMS[o.item] ? o.item : null, rules: sanitizeRules(o.rules, moves), stats, uses, proven, level, xp: xpForLevel(level),
       persona: cleanText(o.persona, PERSONA_MAX, false), playbook: cleanText(o.playbook, PLAYBOOK_MAX, true),
       battleRecord: { w: Math.round(num(rec.w, 0, 1e6, 0)), l: Math.round(num(rec.l, 0, 1e6, 0)), d: Math.round(num(rec.d, 0, 1e6, 0)) },
       publishedAt: num(o.publishedAt, 0, 1e15, 0), record: { w: 0, l: 0, d: 0 }, history: [],
@@ -1166,6 +1372,9 @@
         && Array.isArray(b.b) && b.b.length === N_CTX && b.b.every(Number.isFinite)) {
       f.brain = { W: b.W.map((row) => row.map((v) => num(v, -6, 6, 0))), b: b.b.map((v) => num(v, -50, 50, 0)) };
     } else f.brain = upgradeFighter({ ...f, brain: b }).brain;
+    // the rulebook applies in the arena too: clause breakers and untrained files can't enter
+    if (validateLoadout(f).length) return null;
+    if (!readiness(f).ready) return null;
     return f;
   }
   function sanitizeResult(x, recorder) {
@@ -1224,5 +1433,7 @@
     fight, train, evaluate, exhibition, newSpar, sparTurn, finishSpar, aipvpCommand, clone,
     PERSONA_MAX, PLAYBOOK_MAX, upgradeFighter, awardBattle, RIVALS, RIVAL_SKILLS, rivalFighter, STAT_PCT, PRICE,
     toPublic, sanitizePublic, sanitizeResult, arenaRatings, cleanText, cleanName, compactBrain,
+    WEAPON_EFFECTS, WPRICE, KINDS, maxWeaponBudget, capFor, CLAUSES, RULEBOOK, validateLoadout, FAMILIES, familyOf, familyLabel,
+    unlockedFamilies, lockedIn, practiceNeeded, practiceCount, isProven, readiness, markProven, healSide,
   };
 });
