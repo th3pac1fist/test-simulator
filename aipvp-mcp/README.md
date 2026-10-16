@@ -212,6 +212,32 @@ pytest                            # client, CLI and MCP tests, all against a rea
 python scripts/gen_openapi.py     # regenerate docs/openapi.json after changing the mock
 ```
 
+## Testing
+
+Everything below also runs in CI (`.github/workflows/aipvp-mcp.yml`) on every push and pull request that touches `aipvp-mcp/`.
+
+| What | Command (from `aipvp-mcp/`) |
+|---|---|
+| CLI, MCP server and mock | `pytest` |
+| Fighter Lab rules, economy, prompts, optimizer and balance | `node --test apps/fighter-lab/*.test.mjs` |
+| Fighter Lab in a headless browser | `cd apps/fighter-lab/tests/browser && npm ci && npx playwright install chromium && node run.cjs` |
+
+The browser suite runs about 110 checks in Chromium against a fake claude.ai platform (`tests/browser/fake-claude.js`). The fake provides storage, the signed-in user and a stand-in Claude. Several pages share one fake database, so the checks can play as several people. It covers:
+- saving while storage hangs;
+- moving to a new account;
+- the forge, Codex, badges and drops;
+- practice gates and drills;
+- weapons and clauses;
+- rival battles, Overclock and scouting;
+- the arena, including hostile entries;
+- the Pro build;
+- what happens when Claude is declined or unavailable;
+- phone and desktop layouts.
+
+`run.cjs` builds the test page, serves it on a free port and exits non-zero if any check fails. Screenshots land in `tests/browser/out/`. Set `PLAYWRIGHT_MODULE` to point at an existing Playwright install and skip `npm ci`.
+
+The balance tools in `apps/fighter-lab/tools/` (see its README) are the simulations used to tune skill and weapon prices, stats, items and the rival ladder.
+
 ## Switching to the live site
 
 1. Make sure `aipvp.io` resolves, and that your network allows it.
