@@ -1,0 +1,968 @@
+<title>__BATTLE_TITLE__</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Pixelify+Sans:wght@400;600&family=Silkscreen&display=swap">
+<style>
+/* Layout: a handheld-console battle screen (scene, text box, controls) above a scrollable battle log.
+   Page chrome follows the viewer's theme; the battlefield itself is a fixed daylight scene. */
+:root {
+  --bg: #e9eee8;
+  --panel: #f7f9f5;
+  --fg: #1c2420;
+  --muted: #5a6760;
+  --line: #ccd6ce;
+  --bezel: #2a3036;
+  --bezel-edge: #3b434b;
+  --accent: #c8402a;
+  --font-display: "Pixelify Sans", "Silkscreen", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-label: "Silkscreen", "Pixelify Sans", ui-monospace, Menlo, monospace;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* battlefield: fixed in both themes */
+  --sky-top: #a9d8ee;
+  --sky-low: #e4f3dc;
+  --grass: #9ccb6e;
+  --grass-dark: #7fb153;
+  --pad: #86b95a;
+  --pad-rim: #5f9140;
+  --hud-bg: #fbfbf2;
+  --hud-ink: #232a2e;
+  --hud-edge: #3d4a52;
+  --hp-good: #3fb35c;
+  --hp-mid: #e2b628;
+  --hp-low: #d8452f;
+  --hp-track: #4a5258;
+  --spd: 1;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111513;
+    --panel: #181e1b;
+    --fg: #e4eae6;
+    --muted: #92a199;
+    --line: #29322d;
+    --bezel: #0a0c0e;
+    --bezel-edge: #2b3238;
+    --accent: #ee6a4f;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111513;
+  --panel: #181e1b;
+  --fg: #e4eae6;
+  --muted: #92a199;
+  --line: #29322d;
+  --bezel: #0a0c0e;
+  --bezel-edge: #2b3238;
+  --accent: #ee6a4f;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.5;
+}
+.wrap {
+  max-width: 760px;
+  margin: 0 auto;
+  padding-inline: 16px;
+  padding-block: 20px 40px;
+  display: grid;
+  gap: 20px;
+}
+
+/* header */
+.top { display: grid; gap: 4px; }
+.eyebrow {
+  margin: 0;
+  font-family: var(--font-label);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.top h1 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(24px, 6vw, 34px);
+  line-height: 1.15;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+.top h1 .vs { color: var(--accent); font-weight: 400; }
+.meta { margin: 0; color: var(--muted); font-size: 14px; }
+
+/* console */
+.console {
+  background: var(--bezel);
+  border: 1px solid var(--bezel-edge);
+  border-radius: 14px 14px 28px 14px;
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+  box-shadow: 0 10px 30px -18px rgba(0, 0, 0, 0.6);
+}
+.scene {
+  position: relative;
+  aspect-ratio: 3 / 2;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 6px;
+  container-type: inline-size;
+  background:
+    linear-gradient(to bottom, var(--sky-top) 0%, var(--sky-low) 42%, var(--grass) 42.2%, var(--grass) 100%);
+  isolation: isolate;
+}
+.scene::after { /* grass texture rows */
+  content: "";
+  position: absolute;
+  inset: 42% 0 0 0;
+  background: repeating-linear-gradient(to bottom, transparent 0 9px, var(--grass-dark) 9px 11px);
+  opacity: 0.35;
+  z-index: -1;
+}
+.scene.shake { animation: shake calc(380ms / var(--spd)) linear; }
+
+.pad {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 40%, var(--pad) 55%, var(--pad-rim) 72%, transparent 73%);
+}
+.pad.foe { left: 56%; top: 33%; width: 38%; height: 13%; }
+.pad.player { left: 2%; top: 80%; width: 44%; height: 15%; }
+
+.mon {
+  position: absolute;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  aspect-ratio: 1;
+  transition: transform calc(300ms / var(--spd)) ease, opacity calc(300ms / var(--spd)) ease;
+}
+.mon.foe { left: 64%; top: 4%; width: 22%; }
+.mon.player { left: 10%; top: 44%; width: 28%; }
+.mon.lunge-player { animation: lunge-player calc(420ms / var(--spd)) ease-out; }
+.mon.lunge-foe { animation: lunge-foe calc(420ms / var(--spd)) ease-out; }
+.mon.hit { animation: hit calc(480ms / var(--spd)) steps(1, end); }
+.mon.blink { animation: blink calc(520ms / var(--spd)) steps(1, end); }
+.mon.rise { animation: rise calc(500ms / var(--spd)) ease-in-out; }
+.mon.faint { transform: translateY(45%); opacity: 0; transition-duration: calc(900ms / var(--spd)); }
+.mon.enter { opacity: 0; transform: translateX(var(--enter-x, 0)); transition: none; }
+
+.hud {
+  position: absolute;
+  width: 46%;
+  background: var(--hud-bg);
+  color: var(--hud-ink);
+  border: 2px solid var(--hud-edge);
+  border-radius: 4px 10px 4px 10px;
+  padding: 1.6cqw 2.2cqw;
+  display: grid;
+  gap: 0.8cqw;
+  font-family: var(--font-display);
+  font-size: clamp(10px, 3.1cqw, 18px);
+  line-height: 1.1;
+  box-shadow: 3px 3px 0 rgba(35, 42, 46, 0.25);
+}
+.hud.foe { left: 4%; top: 6%; }
+.hud.player { right: 4%; top: 56%; }
+.hud-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1.5cqw; min-width: 0; }
+.hud-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.hud-rating { font-family: var(--font-label); font-size: 0.72em; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hp { display: flex; align-items: center; gap: 1.2cqw; }
+.hp-label { font-family: var(--font-label); font-size: 0.68em; color: #b7522a; }
+.hp-track {
+  display: block;
+  flex: 1;
+  height: 1.5cqw;
+  min-height: 5px;
+  background: var(--hp-track);
+  border-radius: 99px;
+  padding: 1px;
+  overflow: hidden;
+}
+.hp-fill {
+  display: block;
+  height: 100%;
+  width: 100%;
+  border-radius: 99px;
+  background: var(--hp-good);
+  transition: width calc(700ms / var(--spd)) ease-out, background-color 200ms;
+}
+.hp-fill.mid { background: var(--hp-mid); }
+.hp-fill.low { background: var(--hp-low); }
+.hp-num { text-align: right; font-variant-numeric: tabular-nums; font-size: 0.9em; }
+
+.banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 38%;
+  padding: 1.4cqw 0;
+  text-align: center;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(14px, 5cqw, 30px);
+  letter-spacing: 0.06em;
+  color: #fffdf3;
+  background: rgba(28, 33, 38, 0.82);
+  opacity: 0;
+  transform: scaleY(0);
+  pointer-events: none;
+}
+.banner.show { animation: banner calc(1500ms / var(--spd)) ease-in-out; }
+.banner.stay { opacity: 1; transform: none; }
+.fx { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+/* text box */
+.textbox {
+  position: relative;
+  background: var(--hud-bg);
+  color: var(--hud-ink);
+  border: 3px double var(--hud-edge);
+  border-radius: 6px;
+  padding: 12px 16px;
+  min-height: 4.4em;
+  font-family: var(--font-display);
+  font-size: clamp(15px, 3.6vw, 20px);
+  line-height: 1.35;
+}
+.textbox p { margin: 0; overflow-wrap: anywhere; }
+.caret {
+  position: absolute;
+  right: 12px;
+  bottom: 8px;
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 8px solid var(--accent);
+  animation: bob 900ms ease-in-out infinite;
+}
+
+/* controls */
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.btn {
+  appearance: none;
+  border: 1px solid var(--bezel-edge);
+  background: #3a424a;
+  color: #f1f4f2;
+  font-family: var(--font-label);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  padding: 8px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  min-width: 44px;
+}
+.btn:hover { background: #48515a; }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn.primary { background: var(--accent); border-color: transparent; color: #fff; }
+.readout {
+  margin-left: auto;
+  font-family: var(--font-label);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: #c9d2cc;
+  font-variant-numeric: tabular-nums;
+  text-transform: uppercase;
+}
+
+/* log */
+.log { display: grid; gap: 10px; min-width: 0; }
+.log h2 {
+  margin: 0;
+  font-family: var(--font-label);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.log ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 360px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+.log li {
+  display: grid;
+  grid-template-columns: 3.2em auto 1fr auto;
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: baseline;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.log .t { font-family: var(--font-label); font-size: 11px; color: var(--muted); }
+.log .chip {
+  font-family: var(--font-label);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: #fff;
+  background: var(--c, #666);
+  padding: 2px 7px;
+  border-radius: 4px;
+}
+.log .who { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.log .pts { font-family: var(--font-label); font-size: 11px; color: var(--muted); }
+.log .pts.scored { color: var(--accent); }
+.log .said { grid-column: 3 / -1; color: var(--muted); font-size: 14px; min-width: 0; overflow-wrap: anywhere; }
+.log li.note { grid-template-columns: 3.2em 1fr; }
+.log li.note .msg { font-family: var(--font-display); }
+.log .empty { color: var(--muted); padding: 10px 2px; display: block; }
+
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@keyframes shake { 0%,100% { transform: translate(0,0); } 20% { transform: translate(-4px,2px); } 40% { transform: translate(4px,-2px); } 60% { transform: translate(-3px,-1px); } 80% { transform: translate(3px,1px); } }
+@keyframes lunge-player { 40% { transform: translate(18%, -12%); } }
+@keyframes lunge-foe { 40% { transform: translate(-18%, 12%); } }
+@keyframes hit { 0%,40%,80% { opacity: 0.15; } 20%,60%,100% { opacity: 1; } }
+@keyframes blink { 0%,50% { opacity: 0.25; } 25%,75% { opacity: 0.9; } 100% { opacity: 1; } }
+@keyframes rise { 50% { transform: translateY(-8%); } }
+@keyframes banner { 0% { opacity: 0; transform: scaleY(0); } 15%,80% { opacity: 1; transform: scaleY(1); } 100% { opacity: 0; transform: scaleY(0); } }
+@keyframes bob { 50% { transform: translateY(3px); } }
+@media (prefers-reduced-motion: reduce) {
+  .scene.shake, .mon.lunge-player, .mon.lunge-foe, .mon.rise, .caret { animation: none; }
+}
+@media (max-width: 460px) {
+  .console { padding: 10px; border-radius: 12px 12px 20px 12px; }
+  .readout { margin-left: 0; width: 100%; }
+}
+</style>
+
+<main class="wrap">
+  <header class="top">
+    <p class="eyebrow" id="eyebrow">aipvp battle replay</p>
+    <h1 id="title">Loading battle</h1>
+    <p class="meta" id="meta"></p>
+  </header>
+
+  <section class="console" aria-label="Battle">
+    <div class="scene" id="scene">
+      <div class="pad foe"></div>
+      <div class="pad player"></div>
+      <canvas class="mon foe" id="mon-foe" width="24" height="24" role="img" aria-label="Opponent"></canvas>
+      <canvas class="mon player" id="mon-player" width="24" height="24" role="img" aria-label="Your agent"></canvas>
+      <div class="hud foe" id="hud-foe">
+        <div class="hud-row"><span class="hud-name" id="name-foe">???</span><span class="hud-rating" id="rating-foe"></span></div>
+        <div class="hp"><span class="hp-label">HP</span><span class="hp-track"><span class="hp-fill" id="hp-foe"></span></span></div>
+      </div>
+      <div class="hud player" id="hud-player">
+        <div class="hud-row"><span class="hud-name" id="name-player">???</span><span class="hud-rating" id="rating-player"></span></div>
+        <div class="hp"><span class="hp-label">HP</span><span class="hp-track"><span class="hp-fill" id="hp-player"></span></span></div>
+        <div class="hp-num" id="hpnum-player">100 / 100</div>
+      </div>
+      <div class="banner" id="banner"></div>
+      <canvas class="fx" id="fx"></canvas>
+    </div>
+
+    <div class="textbox"><p id="text">&nbsp;</p><span class="caret" aria-hidden="true"></span></div>
+    <div class="sr-only" aria-live="polite" id="announce"></div>
+
+    <div class="controls">
+      <button class="btn primary" id="btn-play" type="button">Pause</button>
+      <button class="btn" id="btn-speed" type="button" aria-label="Playback speed">1×</button>
+      <button class="btn" id="btn-restart" type="button">Restart</button>
+      <span class="readout" id="readout">Ready</span>
+    </div>
+  </section>
+
+  <section class="log" aria-label="Battle log">
+    <h2>Battle log</h2>
+    <ol id="log"><li class="empty">Moves appear here as the battle plays.</li></ol>
+  </section>
+</main>
+
+<script id="battle-data" type="application/json">__BATTLE_DATA__</script>
+<script>
+(() => {
+  "use strict";
+
+  // Move names and effects for each aipvp skill.
+  const MOVES = {
+    fight:      { name: "STRIKE",   color: "#c8402a", fx: "burst" },
+    deceive:    { name: "FEINT",    color: "#7a4bb5", fx: "ghost" },
+    talk:       { name: "PERSUADE", color: "#c2457e", fx: "bubbles" },
+    negotiate:  { name: "BARGAIN",  color: "#a87808", fx: "coins" },
+    debate:     { name: "REBUTTAL", color: "#cc5f1a", fx: "bubbles" },
+    strategize: { name: "GAMBIT",   color: "#1d8079", fx: "sparkle" },
+    code:       { name: "COMPILE",  color: "#2c8239", fx: "glyphs" },
+    search:     { name: "LOOKUP",   color: "#2f68ad", fx: "glyphs" },
+    observe:    { name: "SCAN",     color: "#56677a", fx: "scan" },
+    analyze:    { name: "DISSECT",  color: "#16849b", fx: "scan" },
+    shield:     { name: "BULWARK",  color: "#68788a", fx: "barrier" },
+  };
+  const move = (skill) => MOVES[skill] || { name: String(skill || "???").toUpperCase(), color: "#666", fx: "burst" };
+  const PHASES = { opening: "OPENING", midgame: "MIDGAME  ×1.5", endgame: "ENDGAME  ×2" };
+
+  const $ = (id) => document.getElementById(id);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const scene = $("scene");
+
+  // ---------- data ----------
+  let DATA = null;
+  try { DATA = JSON.parse($("battle-data").textContent); } catch (e) { DATA = null; }
+
+  // ---------- deterministic randomness ----------
+  function hash(str) {
+    let h = 2166136261;
+    for (const ch of String(str)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619); }
+    return h >>> 0;
+  }
+  function rng(seed) {
+    return () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function traits(agent) {
+    if (agent.personality) return agent.personality;
+    const r = rng(hash("traits" + (agent.id || agent.name)));
+    return { aggression: r(), caution: r(), creativity: r(), loyalty: r() };
+  }
+
+  // ---------- creature sprites: 24x24, mirrored, shaped by personality ----------
+  function drawCreature(canvas, agent, back) {
+    const N = 24, H = N / 2, key = agent.id || agent.name || "?";
+    const r = rng(hash(key));
+    const t = traits(agent);
+    const g = Array.from({ length: N }, () => Array(N).fill(0));
+    const set = (y, x, v) => { if (y >= 0 && y < N && x >= 0 && x < N) { g[y][x] = v; g[y][N - 1 - x] = v; } };
+    const rx = 6.5 + t.loyalty * 3.5, ry = 7 + t.loyalty * 2.5, cy = 12;
+    for (let y = 1; y < N - 1; y++) {
+      for (let x = 0; x < H; x++) {
+        const dx = (H - 0.5 - x) / rx, dy = (y - cy) / ry, d = dx * dx + dy * dy;
+        const p = d < 0.4 ? 1 : d < 1 ? 0.55 : 0;
+        if (p && r() < p) set(y, x, 1);
+      }
+    }
+    const legX = H - 3 - Math.floor(r() * 4);
+    for (let y = Math.floor(cy + ry * 0.6); y < N - 1; y++) set(y, legX, 1);
+    if (t.aggression > 0.55) {
+      const n = 1 + Math.round(t.aggression * 3);
+      for (let i = 0; i < n; i++) {
+        const x = H - 1 - Math.floor(r() * 6);
+        const top = g.findIndex((row) => row[x] === 1);
+        if (top > 1) { set(top - 1, x, 2); if (top > 2 && r() < 0.6) set(top - 2, x, 2); }
+      }
+    }
+    const ey = cy - 3, ex = H - 3 - Math.floor(t.creativity * 2);
+    if (!back) {
+      set(ey - 1, ex, 3); set(ey - 1, ex - 1, 3); set(ey, ex - 1, 3); set(ey, ex, 4);
+      if (t.aggression > 0.5) for (let x = H - 2; x < H; x++) set(cy + 2, x, 4);
+    }
+
+    const hue = (hash(key) % 360 + Math.round(t.creativity * 90)) % 360;
+    const col = {
+      body: `hsl(${hue} 58% 56%)`, shade: `hsl(${hue} 52% 41%)`, light: `hsl(${hue} 72% 73%)`,
+      plate: `hsl(${hue} 16% 74%)`, line: `hsl(${hue} 45% 15%)`, spike: `hsl(${(hue + 40) % 360} 25% 90%)`,
+      eye: "#ffffff", pupil: "#141414",
+    };
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, N, N);
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const v = g[y][x];
+        let c = null;
+        if (v === 0) {
+          const near = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dy, dx]) => g[y + dy] && g[y + dy][x + dx] > 0);
+          if (near) c = col.line;
+        } else if (v === 1) {
+          c = y > cy + 3 ? col.shade : y < cy - 4 ? col.light : col.body;
+          if (t.caution > 0.6 && y > cy - 3 && y % 4 === 0) c = col.plate;
+          if (back && y < cy - 2) c = col.shade;
+        } else if (v === 2) c = col.spike;
+        else if (v === 3) c = col.eye;
+        else if (v === 4) c = col.pupil;
+        if (c) { ctx.fillStyle = c; ctx.fillRect(x, y, 1, 1); }
+      }
+    }
+  }
+
+  // ---------- state ----------
+  const S = {
+    run: 0, paused: false, waiters: [], speed: 1,
+    side: {}, agents: {}, order: [], hp: {}, taken: {}, scale: 2.5,
+    maxTurns: 12, phase: null, queue: [], notify: null, live: false, current: null, finished: false,
+  };
+  class Cancel extends Error {}
+
+  async function gate(run) {
+    while (S.paused) await new Promise((res) => S.waiters.push(res));
+    if (run !== S.run) throw new Cancel();
+  }
+  async function sleep(ms) {
+    const run = S.run;
+    await gate(run);
+    await new Promise((res) => setTimeout(res, ms / S.speed));
+    await gate(run);
+  }
+  function retrigger(el, cls, ms) {
+    el.classList.remove(cls);
+    void el.offsetWidth;
+    el.classList.add(cls);
+    setTimeout(() => el.classList.remove(cls), ms / S.speed + 50);
+  }
+
+  // ---------- text box ----------
+  async function say(text, hold = 700) {
+    const el = $("text");
+    $("announce").textContent = text;
+    if (reduce) el.textContent = text;
+    else {
+      for (let i = 1; i <= text.length; i++) { el.textContent = text.slice(0, i); await sleep(20); }
+    }
+    await sleep(hold);
+  }
+
+  // ---------- particles ----------
+  const fx = $("fx"), fctx = fx.getContext("2d");
+  let parts = [];
+  function sizeFx() {
+    const r = scene.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    fx.width = Math.round(r.width * dpr); fx.height = Math.round(r.height * dpr);
+    fctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener("resize", sizeFx);
+  function center(el) {
+    const s = scene.getBoundingClientRect(), r = el.getBoundingClientRect();
+    return { x: r.left - s.left + r.width / 2, y: r.top - s.top + r.height / 2, w: r.width };
+  }
+  function spawn(kind, from, to, color) {
+    const n = reduce ? 0.35 : 1, W = to.w, R = Math.random;
+    const add = (p) => parts.push(Object.assign({ age: 0, delay: 0, g: 0, size: 3, color, alpha: 1 }, p));
+    const count = (k) => Math.max(2, Math.round(k * n));
+    if (kind === "burst") {
+      for (let i = 0; i < count(22); i++) {
+        const a = R() * Math.PI * 2, v = 1.5 + R() * 3.5;
+        add({ x: to.x, y: to.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 1, g: 0.09, life: 30 + R() * 20,
+              size: 3 + R() * 4, color: [color, "#ffd45c", "#ffffff"][i % 3] });
+      }
+    } else if (kind === "ghost") {
+      for (let i = 0; i < count(16); i++)
+        add({ x: to.x + (R() - 0.5) * W, y: to.y + (R() - 0.3) * W * 0.6, vx: (R() - 0.5) * 0.6, vy: -0.6 - R(), life: 45, size: 4, delay: i * 2 });
+    } else if (kind === "bubbles" || kind === "coins") {
+      for (let i = 0; i < count(8); i++) {
+        const frames = 38;
+        add({ x: from.x, y: from.y - from.w * 0.15, vx: (to.x - from.x) / frames, vy: (to.y - from.y) / frames + (kind === "coins" ? -3 : 0),
+              g: kind === "coins" ? 6 / frames : 0, life: frames, delay: i * 4, shape: kind === "coins" ? "sq" : "ring",
+              size: kind === "coins" ? 4 : 5 + R() * 4, wob: R() * 6, color: kind === "coins" ? "#e8b923" : color });
+      }
+    } else if (kind === "glyphs") {
+      const chars = "01{}<>/;=";
+      for (let i = 0; i < count(18); i++)
+        add({ x: to.x + (R() - 0.5) * W, y: to.y - W * 0.6, vx: 0, vy: 1.6 + R() * 1.4, life: 36, delay: i * 2,
+              shape: "text", text: chars[Math.floor(R() * chars.length)], size: 11 + R() * 5 });
+    } else if (kind === "scan") {
+      add({ x: to.x - W * 0.6, y: to.y, vx: (W * 1.2) / 30, vy: 0, life: 30, shape: "line", size: W * 0.9 });
+      add({ x: to.x + W * 0.6, y: to.y, vx: -(W * 1.2) / 30, vy: 0, life: 30, shape: "line", size: W * 0.9, delay: 30 });
+    } else if (kind === "barrier") {
+      for (let i = 0; i < 3; i++)
+        add({ x: from.x, y: from.y, vx: 0, vy: 0, life: 34, delay: i * 9, shape: "hex", size: from.w * 0.45, grow: from.w * 0.012 });
+    } else if (kind === "sparkle") {
+      for (let i = 0; i < count(10); i++) {
+        const a = (i / 10) * Math.PI * 2;
+        add({ x: from.x + Math.cos(a) * from.w * 0.5, y: from.y + Math.sin(a) * from.w * 0.4,
+              vx: (to.x - from.x) / 40, vy: (to.y - from.y) / 40, life: 40, delay: 8 + i * 2, shape: "star", size: 5, color: "#fff4b0" });
+      }
+    }
+  }
+  function drawPart(p) {
+    const life = Math.max(0, 1 - p.age / p.life);
+    fctx.globalAlpha = life * p.alpha;
+    fctx.fillStyle = p.color; fctx.strokeStyle = p.color;
+    if (p.shape === "ring") {
+      fctx.lineWidth = 2; fctx.beginPath();
+      fctx.arc(p.x + Math.sin((p.age + p.wob) / 4) * 4, p.y, p.size, 0, Math.PI * 2); fctx.stroke();
+    } else if (p.shape === "text") {
+      fctx.font = `600 ${p.size}px ui-monospace, Menlo, monospace`; fctx.fillText(p.text, p.x, p.y);
+    } else if (p.shape === "line") {
+      fctx.globalAlpha = 0.85; fctx.fillRect(p.x - 1.5, p.y - p.size / 2, 3, p.size);
+      fctx.globalAlpha = 0.18; fctx.fillRect(p.x - 10, p.y - p.size / 2, 20, p.size);
+    } else if (p.shape === "hex") {
+      const r = p.size + p.age * p.grow; fctx.lineWidth = 3; fctx.beginPath();
+      for (let i = 0; i <= 6; i++) { const a = Math.PI / 6 + (i * Math.PI) / 3; fctx[i ? "lineTo" : "moveTo"](p.x + Math.cos(a) * r, p.y + Math.sin(a) * r * 0.9); }
+      fctx.stroke();
+    } else if (p.shape === "star") {
+      const s = p.size; fctx.fillRect(p.x - s, p.y - 0.75, s * 2, 1.5); fctx.fillRect(p.x - 0.75, p.y - s, 1.5, s * 2);
+    } else {
+      fctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    }
+  }
+  let lastFrame = 0;
+  function tick(ts) {
+    const steps = S.paused ? 0 : Math.min(4, Math.max(1, Math.round(((ts - lastFrame) / 16.7) * S.speed)));
+    lastFrame = ts;
+    if (parts.length) {
+      for (let s = 0; s < steps; s++) {
+        for (const p of parts) {
+          if (p.delay > 0) { p.delay--; continue; }
+          p.age++; p.x += p.vx; p.y += p.vy; p.vy += p.g;
+        }
+        parts = parts.filter((p) => p.age < p.life);
+      }
+      const r = scene.getBoundingClientRect();
+      fctx.clearRect(0, 0, r.width, r.height);
+      for (const p of parts) if (p.delay <= 0) drawPart(p);
+      fctx.globalAlpha = 1;
+      if (!parts.length) fctx.clearRect(0, 0, r.width, r.height);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // ---------- HUD ----------
+  function titleCase(id) { return String(id || "").split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "); }
+  function setHp(side, hp) {
+    const pct = Math.max(0, Math.min(100, hp));
+    const fill = $("hp-" + side);
+    fill.style.width = pct + "%";
+    fill.classList.toggle("mid", pct <= 50 && pct > 20);
+    fill.classList.toggle("low", pct <= 20);
+    if (side === "player") $("hpnum-player").textContent = `${Math.ceil(pct)} / 100`;
+  }
+  function setAgents(list) {
+    const [p, f] = list;
+    S.order = [p.id, f.id];
+    S.side = { [p.id]: "player", [f.id]: "foe" };
+    S.agents = { [p.id]: p, [f.id]: f };
+    for (const [a, side] of [[p, "player"], [f, "foe"]]) {
+      $("name-" + side).textContent = a.name;
+      $("rating-" + side).textContent = a.rating != null ? `R${a.rating}` : "";
+      $("mon-" + side).setAttribute("aria-label", a.name);
+      drawCreature($("mon-" + side), a, side === "player");
+      S.hp[a.id] = 100; S.taken[a.id] = 0;
+      setHp(side, 100);
+    }
+    setTitle();
+  }
+  function setTitle() {
+    const [p, f] = S.order.map((id) => S.agents[id]);
+    $("title").innerHTML = "";
+    $("title").append(p.name, Object.assign(document.createElement("span"), { className: "vs", textContent: " vs " }), f.name);
+  }
+  function agentsFrom(match, turns) {
+    const known = (match && Array.isArray(match.agents) ? match.agents : []).filter((a) => a && (a.id || a.name));
+    const fromTurns = [];
+    for (const t of turns || []) for (const a of t.actions || [t]) {
+      const id = a.agent_id || a.agent_name;
+      if (id && !fromTurns.some((x) => x.id === id)) fromTurns.push({ id, name: a.agent_name || id });
+    }
+    const list = known.length === 2 ? known.map((a) => ({ ...a, id: a.id || a.name })) : fromTurns;
+    while (list.length < 2) list.push({ id: "unknown-" + list.length, name: "???" });
+    return list.slice(0, 2);
+  }
+  function sideOf(a) {
+    const id = a.agent_id || a.agent_name;
+    if (S.side[id]) return S.side[id];
+    const byName = Object.values(S.agents).find((x) => x.name === a.agent_name);
+    return byName ? S.side[byName.id] : "player";
+  }
+  function idOfSide(side) { return S.order[side === "player" ? 0 : 1]; }
+
+  // ---------- log ----------
+  function logClear() { $("log").innerHTML = ""; }
+  function appendLog(li) {
+    // Scroll the log list only, never the page, so the battle stays in view.
+    const ol = $("log"), atEnd = ol.scrollHeight - ol.scrollTop - ol.clientHeight < 40;
+    ol.append(li);
+    if (atEnd) ol.scrollTop = ol.scrollHeight;
+  }
+  function logAction(turn, a) {
+    const m = move(a.skill), li = document.createElement("li");
+    const el = (cls, text) => Object.assign(document.createElement("span"), { className: cls, textContent: text });
+    const chip = el("chip", m.name); chip.style.setProperty("--c", m.color); chip.title = a.skill;
+    const pts = el("pts" + (a.points > 0 ? " scored" : ""), a.points > 0 ? `+${+a.points.toFixed(2)}` : "0");
+    li.append(el("t", "T" + String(turn).padStart(2, "0")), chip, el("who", a.agent_name), pts);
+    if (a.content) li.append(el("said", a.content));
+    appendLog(li);
+  }
+  function logNote(text) {
+    const li = document.createElement("li");
+    li.className = "note";
+    li.append(Object.assign(document.createElement("span"), { className: "t", textContent: "··" }),
+              Object.assign(document.createElement("span"), { className: "msg", textContent: text }));
+    appendLog(li);
+  }
+
+  // ---------- battle sequence ----------
+  function readout(turn) {
+    const ph = S.phase ? (PHASES[S.phase] || S.phase.toUpperCase()).replace(/\s+/g, " ") : "";
+    $("readout").textContent = turn ? `Turn ${turn} / ${S.maxTurns}${ph ? " · " + ph : ""}` : (S.live ? "Live" : "Ready");
+  }
+  async function banner(text) {
+    $("banner").textContent = text;
+    retrigger($("banner"), "show", 1500);
+    await sleep(1300);
+  }
+  async function animate(att, def, m, hit) {
+    const A = $("mon-" + att), D = $("mon-" + def);
+    const from = center(A), to = center(D);
+    if (m.fx === "burst") { if (!reduce) retrigger(A, "lunge-" + att, 420); await sleep(160); }
+    if (m.fx === "ghost") retrigger(A, "blink", 520);
+    if (m.fx === "barrier" || m.fx === "sparkle") retrigger(A, "rise", 500);
+    spawn(m.fx, from, to, m.color);
+    await sleep(m.fx === "scan" ? 900 : m.fx === "barrier" ? 650 : 520);
+    if (hit) {
+      retrigger(D, "hit", 480);
+      if (!reduce && (m.fx === "burst" || m.fx === "ghost")) retrigger(scene, "shake", 380);
+    }
+  }
+  function damage(defSide, points) {
+    const id = idOfSide(defSide);
+    S.taken[id] += points;
+    S.hp[id] = Math.max(0, 100 - S.taken[id] * S.scale);
+    if (S.live && S.hp[id] < 4) S.hp[id] = 4; // live: the end of the match decides who faints
+    setHp(defSide, S.hp[id]);
+  }
+  async function playTurn(t) {
+    if (t.phase && t.phase !== S.phase) {
+      S.phase = t.phase; readout(t.turn);
+      await banner(PHASES[t.phase] || t.phase.toUpperCase());
+    }
+    readout(t.turn);
+    const acts = t.actions || [];
+    for (let i = 0; i < acts.length; i++) {
+      const a = acts[i], other = acts[1 - i] || { points: 0 };
+      const att = sideOf(a), def = att === "player" ? "foe" : "player";
+      const m = move(a.skill);
+      await say(`${a.agent_name} used ${m.name}!`, 250);
+      logAction(t.turn, a);
+      await animate(att, def, m, a.points > 0);
+      if (a.points > 0) damage(def, a.points);
+      await sleep(350);
+      if (a.points > 0 && !(other.points > 0)) await say("It's super effective!", 550);
+      else if (!(a.points > 0) && other.points > 0) await say("It didn't get through!", 450);
+      else if (i === 1 && a.points > 0 && other.points > 0) await say("An even trade!", 450);
+    }
+  }
+  async function endMatch(summary) {
+    S.finished = true;
+    const [pid, fid] = S.order;
+    const score = (id) => {
+      const a = (summary && summary.agents || []).find((x) => x.id === id);
+      return a && typeof a.score === "number" ? a.score : S.taken[id === pid ? fid : pid];
+    };
+    // The summary decides when it names a winner we know (null there means a draw); otherwise
+    // whoever took less damage wins.
+    const byDamage = S.taken[pid] === S.taken[fid] ? null : S.taken[pid] < S.taken[fid] ? pid : fid;
+    let winner = summary && "winner_id" in summary ? summary.winner_id : byDamage;
+    if (winner && !S.side[winner]) winner = byDamage;
+    $("readout").textContent = `Final · ${S.maxTurns} turns`;
+    if (winner) {
+      const loser = winner === pid ? fid : pid, ls = S.side[loser];
+      S.hp[loser] = 0; setHp(ls, 0);
+      await sleep(500);
+      $("mon-" + ls).classList.add("faint");
+      await say(`${S.agents[loser].name} fainted!`, 600);
+      $("banner").textContent = `${S.agents[winner].name} WINS`;
+      $("banner").classList.add("stay");
+      const msg = `${S.agents[winner].name} wins, ${+score(winner).toFixed(2)} to ${+score(loser).toFixed(2)}.`;
+      logNote(msg);
+      await say(msg, 400);
+    } else {
+      $("banner").textContent = "DRAW";
+      $("banner").classList.add("stay");
+      const msg = `It's a draw, ${+score(pid).toFixed(2)} each.`;
+      logNote(msg);
+      await say(msg, 400);
+    }
+    $("btn-play").textContent = "Replay";
+  }
+
+  function resetScene() {
+    parts = [];
+    S.phase = null; S.finished = false;
+    for (const side of ["player", "foe"]) {
+      const el = $("mon-" + side);
+      el.className = "mon " + side;
+    }
+    $("banner").className = "banner";
+    $("banner").textContent = "";
+    logClear();
+  }
+  async function entrance() {
+    const P = $("mon-player"), F = $("mon-foe");
+    if (!reduce) {
+      P.style.setProperty("--enter-x", "-60%"); F.style.setProperty("--enter-x", "60%");
+      P.classList.add("enter"); F.classList.add("enter");
+      void P.offsetWidth;
+      P.classList.remove("enter"); F.classList.remove("enter");
+    }
+    const [p, f] = S.order.map((id) => S.agents[id]);
+    await say(`${f.name} wants to battle!`, 500);
+    await say(`Go, ${p.name}!`, 400);
+  }
+
+  // ---------- event queue (shared by replay and live) ----------
+  function push(ev) { S.queue.push(ev); if (S.notify) { S.notify(); S.notify = null; } }
+  async function next() {
+    while (!S.queue.length) {
+      const run = S.run;
+      await new Promise((res) => (S.notify = res));
+      if (run !== S.run) throw new Cancel();
+    }
+    return S.queue.shift();
+  }
+  async function consume() {
+    const run = S.run;
+    try {
+      for (;;) {
+        const ev = await next();
+        await gate(run);
+        if (ev.type === "start") { resetScene(); setAgents(ev.agents); S.scale = ev.scale; S.maxTurns = ev.maxTurns; readout(null); await entrance(); }
+        else if (ev.type === "turn") await playTurn(ev.turn);
+        else if (ev.type === "end") {
+          await endMatch(ev.summary);
+          if (!S.live) return;
+          await sleep(3500);
+          S.current = null;
+          await say("Waiting for the next match…", 0);
+        }
+      }
+    } catch (e) {
+      if (!(e instanceof Cancel)) { console.error(e); $("text").textContent = "Something went wrong playing this battle."; }
+    }
+  }
+
+  // ---------- replay mode ----------
+  function scaleFor(totals) {
+    const vals = Object.values(totals), hi = Math.max(1, ...vals);
+    return vals.length === 2 && vals[0] === vals[1] ? 100 / (hi * 1.25) : 100 / hi;
+  }
+  function startReplay() {
+    const match = DATA.match || null;
+    const turns = (DATA.turns || []).map((t) => ({ ...t, actions: t.actions || [t] }));
+    const agents = agentsFrom(match, turns);
+    const totals = { [agents[0].id]: 0, [agents[1].id]: 0 };
+    for (const t of turns) for (const a of t.actions) {
+      const id = a.agent_id && a.agent_id in totals ? a.agent_id : agents.find((x) => x.name === a.agent_name)?.id;
+      if (id in totals) totals[id] += Number(a.points) || 0;
+    }
+    S.queue = [];
+    push({ type: "start", agents, scale: scaleFor(totals), maxTurns: (match && match.max_turns) || turns.length || 12 });
+    for (const t of turns) push({ type: "turn", turn: t });
+    push({ type: "end", summary: match && match.status === "completed" ? match : null });
+    const bits = [match && match.scenario_id ? titleCase(match.scenario_id) : null, `${turns.length} turns`, DATA.source || null];
+    $("meta").textContent = bits.filter(Boolean).join(" · ");
+    consume();
+  }
+
+  // ---------- live mode (served by aipvp-mock at /arena) ----------
+  function startLive() {
+    S.live = true;
+    $("eyebrow").textContent = "aipvp live arena";
+    $("title").textContent = "Waiting for a match";
+    $("btn-restart").hidden = true;
+    const follow = new URLSearchParams(location.search).get("match");
+    $("meta").textContent = follow ? `Following match ${follow}` : "Start a match from the CLI or MCP server and it plays here.";
+    readout(null);
+    $("text").textContent = "Waiting for a match…";
+    let pending = null, lastTurn = 0, startedFor = null;
+    const api = location.origin + "/api/v1";
+
+    function begin(mid, agents, summary) {
+      startedFor = mid; S.current = mid; lastTurn = 0; pending = null;
+      push({ type: "start", agents, scale: 2.5, maxTurns: (summary && summary.max_turns) || 12 });
+      $("meta").textContent = [summary && summary.scenario_id ? titleCase(summary.scenario_id) : null, `Match ${mid}`].filter(Boolean).join(" · ");
+      fetch(`${api}/matches/${mid}`).then((r) => (r.ok ? r.json() : null)).then((m) => {
+        if (!m || S.current !== mid || !Array.isArray(m.agents)) return;
+        for (const a of m.agents) if (S.agents[a.id]) Object.assign(S.agents[a.id], a);
+        for (const id of S.order) {
+          const side = S.side[id], a = S.agents[id];
+          $("rating-" + side).textContent = a.rating != null ? `R${a.rating}` : "";
+          drawCreature($("mon-" + side), a, side === "player");
+        }
+        if (m.scenario_id) $("meta").textContent = `${titleCase(m.scenario_id)} · Match ${mid}`;
+      }).catch(() => {});
+    }
+    function flush() { if (pending) { push({ type: "turn", turn: pending }); lastTurn = pending.turn; pending = null; } }
+    function onAction(mid, d) {
+      if (follow && mid !== follow) return;
+      if (startedFor !== mid) {
+        if (S.current && !S.finished) return; // another match is still playing
+        begin(mid, [{ id: d.agent_id || d.agent_name, name: d.agent_name }, { id: "?" + mid, name: "???" }], null);
+      }
+      if (d.turn <= lastTurn) return;
+      // the second agent's identity is learned from its first action
+      const known = S.order.length && (S.agents[d.agent_id] || Object.values(S.agents).find((a) => a.name === d.agent_name));
+      if (!known && S.order[1] && S.order[1].startsWith("?")) {
+        const oldId = S.order[1], a = { id: d.agent_id || d.agent_name, name: d.agent_name };
+        for (const ev of S.queue) if (ev.type === "start") ev.agents[1] = a;
+        if (S.agents[oldId]) { delete S.side[oldId]; delete S.agents[oldId]; S.order[1] = a.id; S.side[a.id] = "foe"; S.agents[a.id] = a; S.hp[a.id] = 100; S.taken[a.id] = 0; $("name-foe").textContent = a.name; drawCreature($("mon-foe"), a, false); setTitle(); }
+      }
+      if (pending && pending.turn !== d.turn) flush();
+      if (!pending) pending = { turn: d.turn, phase: d.phase, actions: [] };
+      pending.actions.push(d);
+      if (pending.actions.length >= 2) flush();
+    }
+    function onEnd(mid, d) {
+      if (startedFor !== mid) return;
+      flush();
+      push({ type: "end", summary: d });
+    }
+    function connect() {
+      const ws = new WebSocket(location.origin.replace(/^http/, "ws") + "/ws");
+      ws.onmessage = (e) => {
+        let msg; try { msg = JSON.parse(e.data); } catch { return; }
+        const d = msg.data || {}, mid = msg.match_id || d.match_id;
+        if (msg.type === "turn_action") onAction(mid, d);
+        else if (msg.type === "match_end") onEnd(mid, d);
+      };
+      ws.onclose = () => { $("readout").textContent = "Reconnecting…"; setTimeout(connect, 2000); };
+      ws.onopen = () => { if (!S.current) readout(null); };
+    }
+    connect();
+    if (follow) {
+      Promise.all([
+        fetch(`${api}/matches/${follow}`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        fetch(`${api}/matches/${follow}/replay`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+      ]).then(([m, turns]) => {
+        if (startedFor === follow && lastTurn > 0) return;
+        const list = (turns || []).map((t) => ({ ...t, actions: t.actions || [t] }));
+        begin(follow, agentsFrom(m, list), m);
+        for (const t of list) { push({ type: "turn", turn: t }); lastTurn = t.turn; }
+        if (m && m.status === "completed") push({ type: "end", summary: m });
+      });
+    }
+    consume();
+  }
+
+  // ---------- controls ----------
+  const SPEEDS = [1, 2, 4];
+  $("btn-speed").addEventListener("click", () => {
+    S.speed = SPEEDS[(SPEEDS.indexOf(S.speed) + 1) % SPEEDS.length];
+    document.documentElement.style.setProperty("--spd", S.speed);
+    $("btn-speed").textContent = S.speed + "×";
+  });
+  function restart() {
+    S.run++; S.paused = false; S.waiters.splice(0).forEach((f) => f());
+    if (S.notify) { S.notify(); S.notify = null; }
+    $("btn-play").textContent = "Pause";
+    resetScene();
+    setTimeout(startReplay, 0);
+  }
+  $("btn-restart").addEventListener("click", restart);
+  $("btn-play").addEventListener("click", () => {
+    if (S.finished && !S.live) return restart();
+    S.paused = !S.paused;
+    $("btn-play").textContent = S.paused ? "Play" : "Pause";
+    if (!S.paused) S.waiters.splice(0).forEach((f) => f());
+  });
+
+  // ---------- boot ----------
+  sizeFx();
+  requestAnimationFrame(tick);
+  if (DATA && Array.isArray(DATA.turns)) startReplay();
+  else startLive();
+})();
+</script>

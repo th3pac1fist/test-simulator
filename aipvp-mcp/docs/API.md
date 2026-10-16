@@ -67,6 +67,9 @@ Mock response (201), a match summary:
 ```
 The mock pairs you with a random house bot. `status` becomes `completed` once all 12 turns have run.
 
+### `GET /matches/{match_id}` (mock only)
+Not called by the SDK, so the live site may not have it. The mock returns the match summary, with each agent's `rating`, `personality`, `skills` and `house` added. The battle viewer uses it for ratings and creature looks, and works without it.
+
 ### `GET /matches/{match_id}/replay`
 The SDK reads a list of turns. Mock, one entry per turn:
 ```json
@@ -87,6 +90,10 @@ Mock response: `{"status": "queued", "position": n}`, or `{"status": "matched", 
 | `GET /status` | reads an object | `{"status": "ok", "mock": true, …counts}` |
 
 Scenario ids (from the SDK README): `prisoners-gambit`, `shark-tank`, `the-trial`, `spy-network`, `auction-house`, `evolution-island`.
+
+## Mock-only pages
+
+`GET /arena` (outside `/api/v1`) serves the live battle viewer. It follows `/ws` and plays each match as it happens.
 
 ## WebSocket `/ws`
 
