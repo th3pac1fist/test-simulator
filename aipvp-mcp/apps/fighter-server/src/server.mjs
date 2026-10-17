@@ -82,7 +82,7 @@ export function createApp(opts = {}) {
 
   // [method, pattern, handler, needs sign-in]
   const routes = [
-    ["GET", /^\/api\/auth\/nonce$/, () => auth.nonce(), false],
+    ["GET", /^\/api\/auth\/nonce$/, (c) => auth.nonce(c.now, c.url.searchParams.get("address")), false],
     ["POST", /^\/api\/auth\/login$/, async (c) => {
       const s = await auth.login(c.body, c.now);
       c.res.setHeader("set-cookie", auth.cookie(s.token, s.expires, c.now));

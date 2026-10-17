@@ -2,8 +2,11 @@
 (() => {
   "use strict";
   const E = window.FighterEngine, A = window.FighterAgent, SP = window.FighterSprites, ECON = window.FighterEconomy, OPT = window.FighterOptimizer;
+  // The website's battle server (platform-web.js loads it). Absent on claude.ai, where no server path below runs.
+  const NET = window.FighterServer || null;
+  const remote = () => !!(NET && NET.address);   // signed in: the server decides progress and Cycles
   const $ = (id) => document.getElementById(id);
-  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const reduce =matchMedia("(prefers-reduced-motion: reduce)").matches;
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const STYLE_VAR = { aggro: "var(--st-aggro)", social: "var(--st-social)", mind: "var(--st-mind)", guard: "var(--st-guard)" };
   const NAMES = ["NOVA", "RIVET", "EMBER", "QUILL", "VOLT", "MOSS", "ONYX", "PIXEL", "TANGO", "ZEPHYR", "BRAMBLE", "COMET"];
@@ -85,6 +88,10 @@
     sortFighters();
   }
   function saveLocal() {
+    if (remote()) {   // the server keeps the real copy; this device only remembers which fighter was active
+      try { localStorage.setItem(`fighterlab.server@${NET.address}`, JSON.stringify({ activeId: S.activeId })); } catch { /* storage blocked */ }
+      return;
+    }
     const owner = S.me.id || S.localOwner || null;
     try { localStorage.setItem(LOCAL_KEY, JSON.stringify({ owner, fighters: S.fighters, deleted: S.deleted, progress: S.progress, activeId: S.activeId })); }
     catch { /* storage blocked: the account copy still saves */ }
@@ -190,6 +197,7 @@
   }
 
   async function connect() {
+    if (NET) { connectServer(); return; }
     const c = window.claude;
     if (!c || typeof c.use !== "function") { setMode("local"); S.ai.ready = true; softRender(); return; }
     c.use("sample").then((fn) => { S.ai.sample = fn || null; S.ai.ready = true; refreshAiUi(); softRender(); },
@@ -214,6 +222,70 @@
     mergeRemote(snap.docs, true, null);
     S.store.coll.onSnapshot((qs) => mergeRemote(qs.docs, false, qs.docChanges()), () => {});
   }
+  // ---------- the website's battle server ----------
+  let netBusy = false;
+  const arenaNet = { at: 0, busy: false };
+  async function connectServer() {
+    S.ai.ready = true;
+    NET.onChange(() => useServer().catch(serverDown));
+    refreshServerArena(true);
+    try { await NET.ready; await useServer(); } catch { serverDown(); }
+  }
+  function serverDown() { setMode("local"); toast("Couldn't reach the battle server, so this device keeps your fighters."); softRender(); }
+  /** Signed in: load fighters and progress from the server. Signed out: this device's own save. */
+  async function useServer() {
+    stopBattle();
+    Object.assign(S, { draft: null, editingId: null, report: null, spar: null, scouting: {}, lastBattle: null, pendingChallenge: null, rivalId: null });
+    if (!NET.address) { S.me.id = null; loadLocal(); setMode("local"); }
+    else {
+      setMode("connecting");
+      const st = await NET.state();
+      S.me.id = NET.address;
+      S.fighters = st.fighters; S.deleted = [];
+      S.progress = sanitizeProgress(st.progress);
+      sortFighters();
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem(`fighterlab.server@${NET.address}`) || "null"); } catch { /* none */ }
+      S.activeId = saved && find(saved.activeId) ? saved.activeId : S.fighters[0]?.id || null;
+      setMode("server");
+    }
+    if (S.fighters.length) S.tab = "roster"; else { openDesigner(null); S.tab = "design"; }
+    render();
+  }
+  /** Send one action to the battle server. Its answer replaces the local copies; null if it failed (the reason is shown). */
+  async function server(fn) {
+    if (netBusy) { toast("Still working on the last action…"); return null; }
+    netBusy = true; S.store.pending++; renderStore();
+    try {
+      const res = await fn();
+      if (res && res.progress) S.progress = sanitizeProgress(res.progress);
+      if (res && res.fighter) upsertFighter(res.fighter);
+      renderWallet();
+      return res;
+    } catch (e) {
+      toast(e && e.message ? e.message : "The battle server didn't answer. Try again.");
+      if (e && e.status === 401) NET.signedOut();
+      return null;
+    } finally { netBusy = false; S.store.pending--; renderStore(); }
+  }
+  function upsertFighter(f) {
+    const i = S.fighters.findIndex((x) => x.id === f.id);
+    if (i >= 0) S.fighters[i] = f; else S.fighters.push(f);
+    sortFighters();
+  }
+  /** The arena list and ratings, from battles the server ran. Re-fetched at most every 15 s unless forced. */
+  async function refreshServerArena(force) {
+    if (!NET || arenaNet.busy || (!force && Date.now() - arenaNet.at < 15000)) return;
+    arenaNet.busy = true;
+    try {
+      const a = await NET.arena();
+      const docs = {};
+      for (const e of a.entries) (docs[e.owner] = docs[e.owner] || []).push(e.fighter);
+      Object.assign(S.arena, { docs, raw: E.clone(docs), ratings: a.ratings, loaded: true, error: "" });
+    } catch { S.arena.error = "unavailable"; }
+    finally { arenaNet.busy = false; arenaNet.at = Date.now(); }
+    if (S.tab === "arena") render();
+  }
   function setMode(m) { S.store.mode = m; renderStore(); }
   function renderStore() {
     const el = $("store"), st = S.store;
@@ -224,7 +296,7 @@
     else if (st.mode === "local") text = "Saved on this device";
     else if (st.mode === "connecting") { text = st.slow ? "Connecting… allow storage if asked" : "Connecting to your account…"; cls += " saving"; }
     else if (st.pending) { text = st.slow ? "Still saving… allow storage if asked" : "Saving…"; cls += " saving"; }
-    else { text = "Saved to your account"; cls += " db"; }
+    else { text = st.mode === "server" ? "Saved on the battle server" : "Saved to your account"; cls += " db"; }
     el.className = cls; el.textContent = text; el.disabled = !clickable;
   }
   $("store").addEventListener("click", retryFailed);
@@ -272,6 +344,10 @@
   function myArenaList() { return S.me.id ? (S.arena.raw[S.me.id] || []) : []; }
   function canPublish() { return !!(S.arena.db && S.me.id && S.me.canWrite !== false); }
   function publish(f) {
+    if (remote()) {
+      server(() => NET.publish(f.id)).then((r) => { if (r) { toast(`${f.name} is in the arena.`); refreshServerArena(true); } });
+      return;
+    }
     if (!canPublish()) return;
     const uid = S.me.id;
     const list = myArenaList().filter((p) => p.id !== f.id);
@@ -282,6 +358,7 @@
     toast(`${f.name} is in the arena.`);
   }
   function unpublish(id) {
+    if (remote()) { server(() => NET.unpublish(id)).then((r) => { if (r) refreshServerArena(true); }); return; }
     if (!canPublish()) return;
     const uid = S.me.id;
     S.arena.raw[uid] = myArenaList().filter((p) => p.id !== id);
@@ -303,6 +380,10 @@
   async function fillOwnerNames(root) {
     const spans = [...root.querySelectorAll("[data-owner]")];
     if (!spans.length) return;
+    if (NET) {   // website players are wallet addresses
+      for (const s of spans) { const id = s.dataset.owner; s.textContent = id === S.me.id ? "you" : `${id.slice(0, 6)}…${id.slice(-4)}`; }
+      return;
+    }
     const ids = [...new Set(spans.map((s) => s.dataset.owner))];
     let ps = {};
     if (S.me.user) { try { ps = await S.me.user.profiles(ids); } catch { ps = {}; } }
@@ -360,7 +441,7 @@
   function battleRunning() { return !!(S.battle && !S.battle.finished); }
   function setTab(tab) {
     if (tab === S.tab) return;
-    if (battleRunning()) { stopBattle(); toast(S.battle && S.battle.kind === "spar" ? "Sparring stopped." : "Battle stopped. No XP was given."); }
+    if (battleRunning()) { stopBattle(); toast(S.battle && S.battle.kind === "spar" ? "Sparring stopped." : stoppedText(S.battle)); }
     if (S.spar && tab !== "gym") S.spar = null;
     S.tab = tab;
     if (tab === "design" && !S.draft) openDesigner(S.activeId);
@@ -615,6 +696,10 @@
       const id = e.target.id;
       if (id === "add-rule") { d.rules.push({ when: { kind: "my_hp_below", value: 30 }, do: d.item ? { item: true } : { skill: d.moves[0] } }); rerender(); return; }
       if (id === "respec") {
+        if (remote()) {   // the server charges for the reset when the design is saved
+          d.respec = true; d.stats = { power: 0, vitality: 0, speed: 0 };
+          toast(`Points reset. Spend them again, then save (the reset costs ${ECON.PRICES.respec} Cycles when you save).`); rerender(); return;
+        }
         if (pay(ECON.PRICES.respec, `Stat reset for ${d.name}`)) { d.respec = true; d.stats = { power: 0, vitality: 0, speed: 0 }; toast("Points reset. Spend them again, then save."); rerender(); }
         return;
       }
@@ -626,6 +711,17 @@
       }
       if (id === "del") { S.confirmDelete = true; rerender(); return; }
       if (id === "del-no") { S.confirmDelete = false; rerender(); return; }
+      if (id === "del-yes" && remote()) {
+        const fid = S.editingId, name = find(fid)?.name;
+        server(() => NET.deleteFighter(fid)).then((r) => {
+          if (!r) return;
+          S.fighters = S.fighters.filter((f) => f.id !== fid);
+          if (S.activeId === fid) S.activeId = S.fighters[0]?.id || null;
+          saveLocal(); refreshServerArena(true);
+          S.draft = null; S.editingId = null; S.tab = "roster"; render(); toast(`${name} deleted.`);
+        });
+        return;
+      }
       if (id === "del-yes") {
         const name = find(S.editingId)?.name;
         deleteFighter(S.editingId);
@@ -834,8 +930,22 @@
     if (S.tab === "design" && S.draft === d) rerender(); else renderProBox();
   }
 
-  function saveDesign() {
+  async function saveDesign() {
     const d = S.draft, name = d.name.trim().toUpperCase();
+    if (remote()) {
+      // the server takes the files from what you own and keeps level, XP, instincts and practice itself
+      const editing = S.editingId && find(S.editingId);
+      const broken = E.validateLoadout({ moves: d.moves, custom: d.custom, passive: d.passive, weapon: d.weapon });
+      if (broken.length) { toast(broken.join(" ")); return; }
+      const body = { name, design: d.design, personality: d.personality, moves: d.moves, passive: d.passive ? d.passive.id : null, weapon: d.weapon ? d.weapon.id : null,
+                     item: d.item, rules: d.rules, persona: d.persona, playbook: d.playbook, stats: d.stats, respec: d.respec };
+      const r = await server(() => (editing ? NET.updateFighter(editing.id, body) : NET.createFighter(body)));
+      if (!r) return;
+      S.activeId = r.fighter.id; S.draft = null; S.editingId = null; S.report = null; saveLocal();
+      toast(editing ? "Saved." : `${r.fighter.name} is ready. Take it to the Gym.`);
+      S.tab = editing ? "roster" : "gym"; render();
+      return;
+    }
     try {
       const editing = S.editingId && find(S.editingId);
       let f = editing
@@ -1019,12 +1129,14 @@
       if (cx) {
         const key = cx.dataset.codex, price = ECON.codexPrice(key);
         if (unlocked().has(key)) return;
+        if (remote()) { if (await server(() => NET.codex(key))) { toast(`${E.familyLabel(key)} unlocked.`); rerender(); } return; }
         if (pay(price, `Codex: ${E.familyLabel(key)}`)) { S.progress.codex = [...(S.progress.codex || []), key]; saveProgress(); toast(`${E.familyLabel(key)} unlocked.`); rerender(); }
         return;
       }
       const buy = e.target.closest("[data-buy]");
       if (buy) {
         const it = E.ITEMS[buy.dataset.buy];
+        if (remote()) { if (await server(() => NET.buy(it.id))) { toast(`${it.name} bought.`); rerender(); } return; }
         if (pay(it.price, `Bought ${it.name}`)) { S.progress.inventory[it.id] = (S.progress.inventory[it.id] || 0) + 1; saveProgress(); toast(`${it.name} bought.`); rerender(); }
         return;
       }
@@ -1032,6 +1144,7 @@
       if (libDel) {
         const id = libDel.dataset.libDel;
         if (S.fighters.some((f) => f.moves.includes(id) || (f.passive && f.passive.id === id) || (f.weapon && f.weapon.id === id))) { toast("A fighter has this equipped. Unequip it in Design first."); return; }
+        if (remote()) { if (await server(() => NET.dropFile(id))) rerender(); return; }
         S.progress.library = S.progress.library.filter((s) => s.id !== id); saveProgress(); rerender(); return;
       }
       const fxDel = e.target.closest("[data-fx-del]");
@@ -1046,6 +1159,11 @@
         const pv = forgePreview();
         if (!forgeable(pv)) { const l = pv.skill ? E.lockedIn(pv.skill, unlocked()) : []; if (l.length) toast(`Locked: ${l.map((x) => x.label).join(", ")}.`); return; }
         if (S.progress.library.length >= LIBRARY_MAX) { toast(`Your library holds ${LIBRARY_MAX} skills. Delete one first.`); return; }
+        if (remote()) {   // forged and priced by the server, at the active fighter's level
+          const r = await server(() => NET.forge(pv.skill, active()?.id || null));
+          if (r) { toast(`${r.file.name} forged. Equip it in the Design tab.`); resetForge(fz.kind); rerender(); }
+          return;
+        }
         const cost = ECON.forgeCost(pv.skill);
         if (!pay(cost, `Forged ${pv.skill.name}`)) return;
         const skill = { ...pv.skill, id: E.newId(Math.random, "sk_") };
@@ -1234,6 +1352,18 @@
   function doTrain(drill = null) {
     const f = active();
     if (!f) return;
+    if (remote()) {
+      const partner = E.PARTNERS.find((p) => p.id === S.partnerId);
+      if (f.level < partner.unlock) { toast(`${partner.name} unlocks at level ${partner.unlock}.`); return; }
+      server(() => NET.train(f.id, { partner: S.partnerId, reps: S.reps, drill })).then((r) => {
+        if (!r) return;
+        S.report = r.report;
+        render();
+        if (r.ready.length) toast(`${r.ready.join(", ")} ${r.ready.length > 1 ? "are" : "is"} battle-ready.`);
+        else if (r.report.levelAfter > r.report.levelBefore) toast(`Level up! ${r.fighter.name} is now level ${r.report.levelAfter}. Spend the stat point in Design.`);
+      });
+      return;
+    }
     try {
       const partner = E.PARTNERS.find((p) => p.id === S.partnerId);
       if (f.level < partner.unlock) throw new Error(`${partner.name} unlocks at level ${partner.unlock}.`);
@@ -1314,6 +1444,12 @@
     const f = active();
     const partner = E.PARTNERS.find((p) => p.id === S.partnerId);
     if (f.level < partner.unlock) { toast(`${partner.name} unlocks at level ${partner.unlock}.`); return; }
+    if (remote()) {   // the bout lives on the server; each turn comes back with the whole state
+      server(() => NET.spar(f.id, S.partnerId)).then((r) => {
+        if (r) { S.spar = { state: r.spar.state, foe: r.spar.foe, sparId: r.sparId, server: true, fighterId: f.id, busy: false, done: false }; render(); }
+      });
+      return;
+    }
     S.spar = { ...E.newSpar(f, S.partnerId), fighterId: f.id, busy: false, done: false };
     render();
   }
@@ -1345,13 +1481,19 @@
         sp.busy = true;
         for (const x of v.querySelectorAll("[data-act]")) x.disabled = true;
         const prev = st.turns.at(-1);
-        const t = E.sparTurn(sp, +b.dataset.act);
+        let t, over;
+        if (sp.server) {
+          const r = await server(() => NET.sparTurn(sp.sparId, +b.dataset.act));
+          if (!r) { sp.busy = false; if (S.spar === sp) renderSpar(v); return; }
+          t = r.turn; over = r.over; sp.result = r;
+          if (r.spar) sp.state = r.spar.state;
+        } else { t = E.sparTurn(sp, +b.dataset.act); over = st.over; }
         const anim = { seq: ++battleSeq, kind: "spar", cancelled: false, finished: false };
         S.battle = anim;
         try { await playTurn(anim, t, prev ? prev.hp.slice() : [me.max, st.side[1].max], [me.max, st.side[1].max]); } catch (err) { if (!(err instanceof Cancel)) console.error(err); }
         anim.finished = true;
         sp.busy = false;
-        if (st.over) finishSparUi(v); else if (S.spar === sp) renderSpar(v);
+        if (over) finishSparUi(v); else if (S.spar === sp) renderSpar(v);
         return;
       }
       if (e.target.id === "spar-quit") { S.spar = null; render(); }
@@ -1360,6 +1502,15 @@
   function finishSparUi(v) {
     const sp = S.spar, latest = find(sp.fighterId);
     if (!latest) { S.spar = null; render(); return; }
+    if (sp.server) {   // the server already saved the fighter (server() took its copy)
+      const r = sp.result;
+      sp.done = true;
+      renderSpar(v);
+      $("battle-result").innerHTML = `<p class="outcome">${r.match.result === "win" ? "Victory" : r.match.result === "loss" ? "Defeat" : "Draw"}</p>
+        <p class="small" style="margin:0">+${r.xp} XP. ${esc(latest.name)}'s instincts learned from your choices.</p>`;
+      renderActiveBar();
+      return;
+    }
     const out = E.finishSpar(latest, sp);
     saveFighter(out.fighter);
     sp.done = true;
@@ -1385,7 +1536,10 @@
     v.innerHTML = `
       ${gateHtml(f)}
       ${pending ? "" : `<div class="box" id="ladder">${ladderHtml()}</div>`}
-      <div class="box">
+      ${NET ? `<div class="box"><p class="note" id="ai-status" style="margin:0">${remote()
+        ? "Battles run on the battle server on rules and instincts (no Claude), so every result can be replayed and checked."
+        : "You're not signed in, so battles run in this browser on rules and instincts, and what you earn stays on this device. Sign in with your wallet to play on the battle server."}</p>
+        <div id="scout-out" hidden></div></div>` : `<div class="box">
         <div class="airow"><button class="switch" type="button" role="switch" id="ai-switch" aria-checked="${aiUsable()}" aria-label="Claude plays every move"
           ${S.ai.sample && !S.ai.off ? "" : "disabled"}></button><b class="small">Claude plays every action</b></div>
         <p class="note" id="ai-status" style="margin:0">${esc(aiStatusText())}</p>
@@ -1393,7 +1547,7 @@
           <span class="small"><b>Overclock</b> · ${ECON.PRICES.overclock} Cycles: your fighter thinks with Claude's bigger model for the next battle. Smarter, but each turn takes longer.</span></div>
         <div class="row"><button class="btn" type="button" id="scout">Scouting report · ${ECON.PRICES.scout} Cycles</button></div>
         <div id="scout-out">${scoutHtml()}</div>
-      </div>
+      </div>`}
       ${sceneHtml(f)}
       <div id="battle-result"></div>
       <div class="box"><h2>Battle log</h2><ol class="log" id="log"></ol></div>`;
@@ -1452,7 +1606,7 @@
       if (e.target.id === "oc-switch") { S.overclock = !S.overclock; e.target.setAttribute("aria-checked", String(S.overclock)); return; }
       if (e.target.id === "scout") { doScout(); return; }
       if (e.target.id === "fight") { if (!battleRunning()) startBattle("rival", { id: S.rivalId }); return; }
-      if (e.target.id === "b-stop") { if (battleRunning()) { stopBattle(); $("text").textContent = "Battle stopped. No XP was given."; setControls(false); } return; }
+      if (e.target.id === "b-stop") { if (battleRunning()) { const b = S.battle; stopBattle(); $("text").textContent = stoppedText(b); setControls(false); } return; }
       if (e.target.id === "b-play") { togglePause(e.target); return; }
       if (e.target.id === "b-speed") { cycleSpeed(e.target); return; }
       if (e.target.id === "again" && S.battle && S.battle.finished) { const b = S.battle; startBattle(b.kind, b.target); return; }
@@ -1510,12 +1664,14 @@
   function renderArena(v) {
     const f = active();
     const uid = S.me.id;
+    if (NET) refreshServerArena();
     const rows = [];
     for (const [owner, list] of Object.entries(S.arena.docs)) for (const p of list) rows.push({ owner, p, ...(S.arena.ratings[`${owner}/${p.id}`] || { rating: 1000, w: 0, l: 0, d: 0 }) });
     rows.sort((a, b) => b.rating - a.rating || b.w - a.w || a.p.name.localeCompare(b.p.name));
     const mine = f ? myArenaList().find((p) => p.id === f.id) : null;
     let pubBox = "";
-    if (!S.arena.db) pubBox = `<p class="note">The arena needs claude.ai storage, which isn't available in this view.</p>`;
+    if (NET && !uid) pubBox = `<p class="note">Sign in with your wallet to publish fighters and have your challenges rated. Signed out, challenges run in this browser and aren't recorded.</p>`;
+    else if (!S.arena.db && !NET) pubBox = `<p class="note">The arena needs claude.ai storage, which isn't available in this view.</p>`;
     else if (!uid) pubBox = `<p class="note">Sign in to claude.ai to publish fighters.</p>`;
     else if (S.me.canWrite === false) pubBox = `<p class="note">You have view-only access, so you can challenge fighters but not publish or record results. Ask the owner for Contributor access.</p>`;
     else if (!f) pubBox = `<p class="note">Create a fighter to publish it.</p>`;
@@ -1538,14 +1694,19 @@
             <td class="num">${r.p.level}</td><td class="num">${r.rating}</td><td class="num">${r.w}-${r.l}-${r.d}</td>
             <td>${f && !own ? `<button class="btn" type="button" data-challenge="${esc(r.owner)}|${esc(r.p.id)}">Challenge</button>` : ""}</td></tr>`;
         }).join("")}</tbody></table></div>`
-      : `<p class="note">${S.arena.loaded ? "No fighters in the arena yet. Publish yours, then share this game with friends so they can publish theirs." : S.arena.db ? "Loading the arena…" : ""}</p>`;
+      : `<p class="note">${S.arena.loaded ? "No fighters in the arena yet. Publish yours, then share this game with friends so they can publish theirs." : S.arena.db || NET ? "Loading the arena…" : ""}</p>`;
+    const reward = `Wins pay ${ECON.arenaReward(ECON.newWallet(), "win", false)} Cycles (up to ${ECON.ARENA_REWARDS_PER_DAY} rewards a day; beating your own fighters pays nothing).`;
     v.innerHTML = `<div class="box">
         <h2>Arena</h2>
-        <p class="small" style="margin:0">Fighters published by everyone who plays this game. When you challenge one, Claude plays both sides, each with its own persona, playbook, rules and instincts. The requests come from your Claude account. Wins pay ${ECON.arenaReward(ECON.newWallet(), "win", false)} Cycles (up to ${ECON.ARENA_REWARDS_PER_DAY} rewards a day; beating your own fighters pays nothing).</p>
+        <p class="small" style="margin:0">${NET
+          ? `Fighters published by everyone who plays on this site. Challenges run on the battle server on each fighter's rules and instincts. ${reward}`
+          : `Fighters published by everyone who plays this game. When you challenge one, Claude plays both sides, each with its own persona, playbook, rules and instincts. The requests come from your Claude account. ${reward}`}</p>
         ${pubBox}
       </div>
       <div class="box"><h2>Leaderboard</h2>${table}
-        <p class="note">To bring friends in, share this game with them as Contributors (Share menu). Results are worked out in the challenger's browser and every published fighter is re-checked by the game, but it's still a friendly league, not a tamper-proof one.</p>
+        <p class="note">${NET
+          ? "Ratings come only from battles the server ran and stored with their seeds, so a browser can't make up a result."
+          : "To bring friends in, share this game with them as Contributors (Share menu). Results are worked out in the challenger's browser and every published fighter is re-checked by the game, but it's still a friendly league, not a tamper-proof one."}</p>
       </div>`;
     paintSprites(v);
     fillOwnerNames(v);
@@ -1757,9 +1918,42 @@
   }
 
   /** Start a real battle: Claude (or rules, or instincts) choose, turns animate as they arrive. */
+  /** What to say when a battle is stopped part way. A server battle was decided before it was shown. */
+  function stoppedText(b) {
+    return b && b.remote ? "Playback stopped. The server already decided this battle, and its result counts." : "Battle stopped. No XP was given.";
+  }
+  /** Website: the server runs the battle and pays out; this plays the finished turns back. */
+  async function startServerBattle(kind, target) {
+    const meRaw = active();
+    const rd = E.readiness(meRaw);
+    if (!rd.ready) { toast(rd.pending.length ? `${rd.pending[0].name} is still in training (${rd.pending[0].have}/${rd.pending[0].need}). Practice it in the Gym first.` : rd.clauses[0]); return; }
+    if (netBusy) { toast("Still working on the last action…"); return; }
+    stopBattle();
+    const label = kind === "rival" ? "Rival battle" : "Arena challenge";
+    const b = { seq: ++battleSeq, kind, target, me: E.clone(meRaw), foe: null, useAi: false, overclock: false, queue: [], done: true, finished: false, cancelled: false,
+                out: null, error: null, label, remote: true, server: null };
+    S.battle = b;
+    setControls(true);
+    textbox("The battle server is running the battle…");
+    const beaten = S.progress.beaten.slice();
+    const res = await server(() => NET.battle(meRaw.id, kind === "rival" ? { rival: target.id } : { owner: target.owner, fighter: target.id }));
+    if (!res) { if (S.battle === b) { textbox("The battle didn't start."); finishUi(b); } return; }
+    if (kind === "rival" && !beaten.includes(target.id) && res.progress.beaten.includes(target.id)) {
+      const next = E.RIVALS[E.RIVALS.findIndex((r) => r.id === target.id) + 1];
+      if (next) S.rivalId = next.id;
+    }
+    if (kind === "arena") refreshServerArena(true);
+    const rule = res.match.turns.filter((t) => t.actions[0].source === "rule").length;
+    Object.assign(b, { server: res, me: res.me, foe: res.foe, queue: res.match.turns.slice(), out: { match: res.match, stats: { ai: 0, rule, instinct: res.match.turns.length - rule } } });
+    if (b.cancelled || S.battle !== b || !$("scene")) { renderActiveBar(); return; }   // left mid-request: the result still counts
+    prepareScene(b.me, b.foe, label);
+    $("scene").closest(".console").scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    animateBattle(b, () => Promise.resolve()).catch((e) => { if (!(e instanceof Cancel)) console.error(e); });
+  }
   function startBattle(kind, target) {
     const meRaw = active();
     if (!meRaw || !$("scene")) return;
+    if (remote()) { startServerBattle(kind, target); return; }
     const rd = E.readiness(meRaw);
     if (!rd.ready) { toast(rd.pending.length ? `${rd.pending[0].name} is still in training (${rd.pending[0].have}/${rd.pending[0].need}). Practice it in the Gym first.` : rd.clauses[0]); return; }
     stopBattle();
@@ -1833,6 +2027,24 @@
   }
   function finishUi(b) { b.finished = true; setControls(false); }
   function applyResult(b) {
+    const out = b.out, m = out.match, s = out.stats;
+    const lines = b.server ? b.server.lines.slice() : localResult(b);
+    const how = b.server
+      ? `Run on the battle server: ${s.rule || 0} actions by battle rules, ${s.instinct} by instinct. It can be replayed from its seed and checked.`
+      : `${s.ai} actions by Claude${b.overclock ? " (overclocked)" : ""}, ${s.rule || 0} by battle rules, ${s.instinct} by instinct.`;
+    const res = m.winner === null ? "Draw" : m.winner === 0 ? "Victory" : "Defeat";
+    $("battle-result").innerHTML = `<div class="box">
+      <div class="outcome">${res} vs ${esc(b.foe.name)}</div>
+      ${lines.map((l) => `<p class="small" style="margin:0">${esc(l)}</p>`).join("")}
+      <p class="note" style="margin:0">${esc(how)}</p>
+      <div class="row"><button class="btn primary" type="button" id="again">Rematch</button></div>
+      <div data-coach-box>${coachHtml()}</div>
+    </div>`;
+    renderActiveBar(); renderWallet(); refreshAiUi();
+    if (b.server) refreshLadder();
+  }
+  /** Rewards for a battle run in this browser (claude.ai, or the website signed out). Returns the result lines. */
+  function localResult(b) {
     const out = b.out, m = out.match;
     const latest = find(b.me.id);
     const lines = [];
@@ -1870,7 +2082,7 @@
         }
       }
       if (b.kind === "arena") {
-        lines.push(recordResult(b, m) ? "Result recorded on the arena leaderboard." : "This result isn't recorded (you need Contributor access and a sign-in).");
+        lines.push(recordResult(b, m) ? "Result recorded on the arena leaderboard." : NET ? "This result isn't recorded (sign in with your wallet to have challenges rated)." : "This result isn't recorded (you need Contributor access and a sign-in).");
         const own = b.target.owner === S.me.id;
         const paid = ECON.payArena(S.progress.wallet, award.result, own, `${b.target.owner}/${b.target.id}`);
         if (paid.amount) {
@@ -1882,16 +2094,7 @@
       }
       queueReview(f.id, A.battleSummary(m, 0, f));
     }
-    const res = m.winner === null ? "Draw" : m.winner === 0 ? "Victory" : "Defeat";
-    const s = out.stats;
-    $("battle-result").innerHTML = `<div class="box">
-      <div class="outcome">${res} vs ${esc(b.foe.name)}</div>
-      ${lines.map((l) => `<p class="small" style="margin:0">${esc(l)}</p>`).join("")}
-      <p class="note" style="margin:0">${s.ai} actions by Claude${b.overclock ? " (overclocked)" : ""}, ${s.rule || 0} by battle rules, ${s.instinct} by instinct.</p>
-      <div class="row"><button class="btn primary" type="button" id="again">Rematch</button></div>
-      <div data-coach-box>${coachHtml()}</div>
-    </div>`;
-    renderActiveBar(); renderWallet(); refreshAiUi();
+    return lines;
   }
   /** Maybe add a blueprint to the library after a real win; duplicates become Cycles. Returns a result line or "". */
   function grantDrop({ source, opponentLevel, prefer }) {

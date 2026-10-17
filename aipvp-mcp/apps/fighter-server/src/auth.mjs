@@ -2,7 +2,7 @@
 // single-use nonce from this server and must name this site and the test network; sessions are random
 // tokens kept in an HttpOnly cookie.
 import { randomBytes } from "node:crypto";
-import { getAddress, verifyMessage } from "viem";
+import { getAddress, isAddress, verifyMessage } from "viem";
 import { generateSiweNonce, parseSiweMessage, validateSiweMessage } from "viem/siwe";
 
 export const NONCE_TTL = 10 * 60 * 1000;
@@ -17,11 +17,12 @@ export class AuthError extends Error {
 export function createAuth(st, cfg, game) {
   const site = new URL(cfg.origin);
   return {
-    /** What the browser needs to write the sign-in message. */
-    nonce(now = Date.now()) {
+    /** What the browser needs to write the sign-in message (with the address checksummed, as EIP-4361 asks). */
+    nonce(now = Date.now(), address = null) {
       const nonce = generateSiweNonce();
       st.addNonce(nonce, now + NONCE_TTL);
-      return { nonce, domain: site.host, uri: site.origin, chainId: cfg.chainId, version: "1", statement: cfg.statement };
+      const checksummed = typeof address === "string" && isAddress(address, { strict: false }) ? getAddress(address) : null;
+      return { nonce, domain: site.host, uri: site.origin, chainId: cfg.chainId, version: "1", statement: cfg.statement, address: checksummed };
     },
     /** Check a signed sign-in message; returns { address, token, expires }. */
     async login({ message, signature } = {}, now = Date.now()) {
