@@ -1,0 +1,21 @@
+{
+  "name": "fighter-lab-server",
+  "private": true,
+  "description": "Fighter Lab battle server and test-token prototype (Base Sepolia). Test tokens only: no real value.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.mjs\"",
+    "compile": "node scripts/compile.mjs",
+    "deploy": "node scripts/deploy.mjs"
+  },
+  "dependencies": {
+    "viem": "2.57.7"
+  },
+  "devDependencies": {
+    "solc": "0.8.28"
+  }
+}
