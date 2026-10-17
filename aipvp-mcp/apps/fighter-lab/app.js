@@ -6,7 +6,7 @@
   const NET = window.FighterServer || null;
   const remote = () => !!(NET && NET.address);   // signed in: the server decides progress and Cycles
   const $ = (id) => document.getElementById(id);
-  const reduce =matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const STYLE_VAR = { aggro: "var(--st-aggro)", social: "var(--st-social)", mind: "var(--st-mind)", guard: "var(--st-guard)" };
   const NAMES = ["NOVA", "RIVET", "EMBER", "QUILL", "VOLT", "MOSS", "ONYX", "PIXEL", "TANGO", "ZEPHYR", "BRAMBLE", "COMET"];
@@ -228,6 +228,11 @@
   async function connectServer() {
     S.ai.ready = true;
     NET.onChange(() => useServer().catch(serverDown));
+    NET.onProgress((p) => {   // withdrawals, refunds and deposits change Cycles outside the game
+      if (!remote()) return;
+      S.progress = sanitizeProgress(p);
+      if (S.tab === "forge") { const y = window.scrollY; render(); window.scrollTo({ top: y }); } else softRender();
+    });
     refreshServerArena(true);
     try { await NET.ready; await useServer(); } catch { serverDown(); }
   }
@@ -1065,8 +1070,8 @@
         <div class="box">
           <h2>Wallet</h2>
           <div class="outcome">${balance()} Cycles</div>
-          <p class="small" style="margin:0">Earn Cycles by beating rivals and arena opponents. Spend them on gym time (${q.freeLeft} of ${ECON.FREE_ROUNDS_PER_DAY} free rounds left today), compute, skills and items.
-          Cycles have no cash value and can't be transferred.</p>
+          <p class="small" style="margin:0">Earn Cycles by beating rivals and arena opponents. Spend them on gym time (${Math.max(0, q.freeLeft)} of ${ECON.FREE_ROUNDS_PER_DAY} free rounds left today), compute, skills and items.
+          ${NET ? "Cycles have no cash value. Signed in, you can turn them into test tokens (no value either) in the Account box." : "Cycles have no cash value and can't be transferred."}</p>
           <ul class="ledger">${ledger}</ul>
         </div>
         <div class="box">

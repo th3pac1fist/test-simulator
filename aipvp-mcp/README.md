@@ -198,6 +198,16 @@ The creatures, move names and art are original to this project. The page only bo
   - ledger math and daily caps;
   - the AI runner's fallbacks, and that opponents' text stays out of prompts.
 
+## Fighter Lab website, battle server and test token
+
+`apps/fighter-server/` is a prototype of phases 1 and 2 of [`docs/CRYPTO.md`](docs/CRYPTO.md). It runs on a **test network only** (Base Sepolia), so nothing has real value. It has three parts:
+
+- **A battle server:** it owns fighters and the Cycles ledger, and runs battles that pay out, on rules and instincts, with replayable seeds.
+- **A website:** the same game, played with wallet sign-in.
+- **tCYC:** an ERC-20 test token. Players can withdraw Cycles as signed vouchers they claim, and deposit tokens back as Cycles.
+
+The claude.ai artifact is unchanged. Setup, deploying the token with your own test wallet, and security notes are in [its README](apps/fighter-server/README.md).
+
 ## Mock server
 
 `aipvp-mock [--port 8787] [--turn-delay 0.5]`
@@ -221,6 +231,8 @@ Everything below also runs in CI (`.github/workflows/aipvp-mcp.yml`) on every pu
 | CLI, MCP server and mock | `pytest` |
 | Fighter Lab rules, economy, prompts, optimizer and balance | `node --test apps/fighter-lab/*.test.mjs` |
 | Fighter Lab in a headless browser | `cd apps/fighter-lab/tests/browser && npm ci && npx playwright install chromium && node run.cjs` |
+| Fighter Lab server, sign-in, test token contract and wallet (in-memory chain) | `cd apps/fighter-server && npm ci && npm test` |
+| Fighter Lab website with the server and a fake wallet | `cd apps/fighter-server && npm run test:website` (after the browser suite's `npm ci`) |
 
 The browser suite runs about 110 checks in Chromium against a fake claude.ai platform (`tests/browser/fake-claude.js`). The fake provides storage, the signed-in user and a stand-in Claude. Several pages share one fake database, so the checks can play as several people. It covers:
 - saving while storage hangs;

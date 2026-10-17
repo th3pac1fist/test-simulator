@@ -10,7 +10,9 @@
     "start": "node --disable-warning=ExperimentalWarning src/server.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.mjs\"",
     "compile": "node scripts/compile.mjs",
-    "deploy": "node scripts/deploy.mjs"
+    "deploy": "node scripts/deploy.mjs",
+    "new-key": "node scripts/new-key.mjs",
+    "test:website": "node --disable-warning=ExperimentalWarning test/browser/website.mjs"
   },
   "dependencies": {
     "viem": "2.57.7"

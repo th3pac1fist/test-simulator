@@ -83,3 +83,18 @@ test("key rotation: only the owner can change the signer; old-key vouchers stop 
   assert.equal(await t.revertName(me, "claim", [v.amount, v.nonce, v.deadline, oldSig]), "BadSignature");
   assert.equal((await t.send(me, "claim", [v.amount, v.nonce, v.deadline, await t.voucher(v, next)])).status, "success");
 });
+
+test("deploy script: the token gets the server's signer, and the deployer owns it", async () => {
+  const { devChain } = await import("./devchain.mjs");
+  const { createPublicClient, createWalletClient, custom } = await import("viem");
+  const { deploy } = await import("../scripts/deploy.mjs");
+  const chain = await devChain();
+  const transport = custom(chain.provider);
+  const me = randomAddress(), signer = randomAddress();
+  const out = await deploy({ publicClient: createPublicClient({ transport }), walletClient: createWalletClient({ transport }), account: me, signerAddress: signer, owner: me });
+  const read = (functionName) => createPublicClient({ transport }).readContract({ address: out.token, abi: ABI, functionName });
+  assert.equal(await read("signer"), signer);
+  assert.equal(await read("owner"), me);
+  assert.equal(await read("totalSupply"), 0n);
+  assert.ok(out.block > 0n);
+});

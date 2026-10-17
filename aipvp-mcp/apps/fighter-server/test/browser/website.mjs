@@ -13,6 +13,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import { createApp } from "../../src/server.mjs";
+import { chainModule } from "../../src/chain.mjs";
+import { deployToken } from "../token-helpers.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -27,7 +29,8 @@ const freePort = () => new Promise((res) => { const s = net.createServer(); s.li
 
 const port = await freePort();
 const ORIGIN = `http://127.0.0.1:${port}`;
-const app = createApp({ origin: ORIGIN });
+const t = await deployToken();
+const app = createApp({ origin: ORIGIN, chain: chainModule({ token: t.token, signerKey: t.signerKey, transport: t.transport, confirmations: 0 }) });
 await new Promise((r) => app.server.listen(port, "127.0.0.1", r));
 
 const browser = await chromium.launch();
@@ -39,6 +42,7 @@ async function walletPage(ctx, errors, acct = account) {
   page.on("pageerror", (e) => errors.push(e.message));
   page.on("console", (m) => m.type() === "error" && !/fonts\.g|ERR_|Failed to load resource/.test(m.text()) && errors.push(m.text()));
   await page.exposeFunction("__walletSign", (hex) => acct.signMessage({ message: { raw: hex } }));
+  await page.exposeFunction("__walletSend", async (tx) => (await t.sendTx(acct.address, { to: tx.to, data: tx.data })).transactionHash);
   await page.addInitScript((addr) => {
     const calls = (window.__walletCalls = []);
     window.ethereum = {
@@ -49,6 +53,7 @@ async function walletPage(ctx, errors, acct = account) {
         if (method === "eth_chainId") return "0x14a34";
         if (method === "wallet_switchEthereumChain") return null;
         if (method === "personal_sign") return window.__walletSign(params[0]);
+        if (method === "eth_sendTransaction") return window.__walletSend(params[0]);
         throw Object.assign(new Error("unsupported " + method), { code: 4200 });
       },
     };
@@ -154,6 +159,25 @@ try {
   ok("forge: the file is in the server's library", lib.length === libBefore + 1, `${libBefore} → ${lib.length}`);
   ok("forge: charged by the server's price", (await wallet(page)) < cyclesBefore && (await wallet(page)) === app.store.ledgerSum(account.address));
   ok("ledger: the page's Cycles match the server's ledger", (await wallet(page)) === app.store.ledgerSum(account.address), `${await wallet(page)} vs ${app.store.ledgerSum(account.address)}`);
+
+  // test tokens: withdraw Cycles as a voucher the wallet claims, then deposit some back
+  ok("wallet: the account box shows test tokens", (await page.textContent("#web-account")).includes("0 tCYC"));
+  const cyclesAtStart = await wallet(page);
+  await page.fill("#web-withdraw-n", "20");
+  await page.click("#web-withdraw");
+  await page.waitForFunction(() => /Claimed/.test(document.getElementById("web-note")?.textContent || ""), null, { timeout: 30000 });
+  ok("wallet: the claim minted 20 tCYC on chain", (await t.read("balanceOf", [account.address])) === 20n * 10n ** 18n);
+  ok("wallet: the page shows the tokens", (await page.textContent("#web-tokens")).includes("20 tCYC"));
+  ok("wallet: 20 Cycles left the game", (await wallet(page)) === cyclesAtStart - 20 && (await wallet(page)) === app.store.ledgerSum(account.address), `${cyclesAtStart} → ${await wallet(page)}`);
+  ok("wallet: the voucher is marked claimed", app.store.withdrawals(account.address)[0]?.status === "claimed");
+  ok("wallet: the note links to the explorer", (await page.getAttribute("#web-note a", "href")).startsWith("https://sepolia.basescan.org/tx/0x"));
+  await page.fill("#web-deposit-n", "5");
+  await page.click("#web-deposit");
+  await page.waitForFunction(() => /Deposited/.test(document.getElementById("web-note")?.textContent || ""), null, { timeout: 30000 });
+  ok("wallet: the deposit burned 5 tCYC", (await t.read("balanceOf", [account.address])) === 15n * 10n ** 18n);
+  ok("wallet: and credited 5 Cycles", (await wallet(page)) === cyclesAtStart - 15 && (await wallet(page)) === app.store.ledgerSum(account.address), String(await wallet(page)));
+  ok("wallet: the Forge tab's wallet shows the same Cycles", (await page.textContent("#view .outcome")).includes(`${await wallet(page)} Cycles`));
+  await page.screenshot({ path: path.join(OUT, "website-wallet.png"), fullPage: false });
 
   // the arena: publish, then a second player challenges
   await page.click('.tab[data-tab="arena"]');
