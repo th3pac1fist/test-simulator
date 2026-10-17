@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { openStore } from "./store.mjs";
 import { createGame, GameError } from "./game.mjs";
 import { createAuth, AuthError, COOKIE } from "./auth.mjs";
+import { chainModule } from "./chain.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GAME_DIR = path.resolve(HERE, "../../fighter-lab");
@@ -160,12 +161,29 @@ export function createApp(opts = {}) {
 // `node src/server.mjs`: settings come from the environment (or a .env file next to package.json)
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { process.loadEnvFile(path.resolve(HERE, "../.env")); } catch { /* no .env: defaults */ }
-  const port = Number(process.env.PORT || 8787);
-  const { server } = createApp({
-    origin: process.env.ORIGIN || `http://localhost:${port}`,
-    chainId: Number(process.env.CHAIN_ID || 84532),
-    dbFile: process.env.DB_FILE || path.resolve(HERE, "../fighter-lab.db"),
-    trustProxy: process.env.TRUST_PROXY === "1",
+  const env = process.env;
+  const port = Number(env.PORT || 8787);
+  const chainId = Number(env.CHAIN_ID || 84532);
+  if (![84532, 31337].includes(chainId)) {   // Base Sepolia or a local dev chain: never a network with real money
+    console.error(`CHAIN_ID ${chainId} isn't a test network. This prototype runs on Base Sepolia (84532) only.`);
+    process.exit(1);
+  }
+  const tokenVars = ["TOKEN_ADDRESS", "SIGNER_KEY", "RPC_URL"].filter((k) => env[k]);
+  if (tokenVars.length && tokenVars.length < 3) console.warn("Set TOKEN_ADDRESS, SIGNER_KEY and RPC_URL together to turn on the wallet. Running without it.");
+  const app = createApp({
+    origin: env.ORIGIN || `http://localhost:${port}`,
+    chainId,
+    dbFile: env.DB_FILE || path.resolve(HERE, "../fighter-lab.db"),
+    trustProxy: env.TRUST_PROXY === "1",
+    chain: tokenVars.length === 3 ? chainModule({ token: env.TOKEN_ADDRESS, signerKey: env.SIGNER_KEY, rpcUrl: env.RPC_URL,
+      startBlock: env.START_BLOCK, confirmations: env.CONFIRMATIONS, explorer: env.EXPLORER_URL }) : null,
   });
-  server.listen(port, () => console.log(`Fighter Lab server on http://localhost:${port}`));
+  app.server.listen(port, () => console.log(`Fighter Lab server on http://localhost:${port}${app.chain ? "" : " (no test token configured)"}`));
+  if (app.chain) {
+    app.chain.check().then(() => console.log(`Test token ${env.TOKEN_ADDRESS} on chain ${chainId}: settings match.`),
+      (e) => console.error("Token check failed (withdrawals stay paused until it passes):", e.shortMessage || e.message));
+    const tick = () => app.chain.sync().catch((e) => console.error("Chain sync:", e.shortMessage || e.message));
+    setInterval(tick, Number(env.SYNC_SECONDS || 15) * 1000);
+    tick();
+  }
 }
