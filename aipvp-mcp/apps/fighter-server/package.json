@@ -1,0 +1,31 @@
+{
+  "name": "fighter-lab-server",
+  "private": true,
+  "description": "Fighter Lab battle server and test-token prototype (Base Sepolia). Test tokens only: no real value.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.mjs",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.mjs\"",
+    "compile": "node scripts/compile.mjs",
+    "deploy": "node scripts/deploy.mjs",
+    "new-key": "node scripts/new-key.mjs",
+    "test:website": "node --disable-warning=ExperimentalWarning test/browser/website.mjs"
+  },
+  "dependencies": {
+    "viem": "2.57.7"
+  },
+  "devDependencies": {
+    "@ethereumjs/block": "10.1.3",
+    "@ethereumjs/common": "10.1.3",
+    "@ethereumjs/util": "10.1.3",
+    "@ethereumjs/vm": "10.1.3",
+    "@openzeppelin/contracts": "5.6.1",
+    "solc": "0.8.37"
+  },
+  "overrides": {
+    "tmp": "0.2.7"
+  }
+}

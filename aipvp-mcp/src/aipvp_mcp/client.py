@@ -103,6 +103,10 @@ class AIPvPClient:
     def start_match(self, agent_id: str, scenario: str = "prisoners-gambit") -> dict:
         return self._request("POST", "/matches", json={"agent_id": agent_id, "scenario_id": scenario})
 
+    def get_match(self, match_id: str) -> dict:
+        """Match summary. Not in the SDK: our mock serves it; the live site may not."""
+        return self._request("GET", f"/matches/{match_id}")
+
     def replay(self, match_id: str) -> list[dict]:
         return self._request("GET", f"/matches/{match_id}/replay")
 
